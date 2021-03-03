@@ -116,7 +116,6 @@ struct proxy_response_s {
     byte_buf_t* msg;
 };
 
-#define FS_SERVER_PROXY_MSG_HEADER_LEN (sizeof(int8_t) + sizeof(uint32_t))
 #define FS_SERVER_PROXY_RESP_DECODE_FINISH_STAGE 6
 
 static void proxy_response_decode(byte_buf_t* buffer, proxy_response_t* response, uint64_t* stage);
@@ -170,12 +169,6 @@ struct server_ctx_s {
 
     // 事务ID与client上下文映射关系
     client_ctx_t* transactions[FS_SERVER_MAX_TRANSACTION];
-
-    // 消息缓冲区总可读字节数
-    uint32_t message_cache_size;
-
-    // 未解码的消息缓冲区
-    deque_t* message_cache;
 
     // 认证消息响应解码缓存
     auth_response_t auth_decode_cache;
@@ -232,10 +225,6 @@ static inline void stage_decoded_length_set(uint64_t* stage, uint32_t length) {
     *stage = v;
 }
 
-static void message_cache_cleaner(void* elements, void* userdata) {
-    byte_buf_release(elements);
-}
-
 static inline void auth_decode_cache_clean(auth_response_t* cache) {
     if (cache->extra_msg != NULL) {
         free(cache->extra_msg);
@@ -270,7 +259,6 @@ server_ctx_t* server_forward_initial(server_config_t *config, service_ctx_t* ser
     }
 
     ctx->event_base = base;
-    ctx->message_cache = deque_new(32);
 
     if (!server_connect(ctx)) {
         free(ctx);
@@ -285,7 +273,6 @@ void server_forward_run(server_ctx_t *ctx) {
 
 void server_forward_stop(server_ctx_t *ctx) {
     bufferevent_free(ctx->event);
-    deque_free(ctx->message_cache, message_cache_cleaner, NULL);
     auth_decode_cache_clean(&ctx->auth_decode_cache);
     proxy_decode_cache_clean(&ctx->proxy_decode_cache);
     event_base_free(ctx->event_base);
@@ -313,8 +300,6 @@ static bool server_connect(server_ctx_t* ctx) {
         }
     }
 
-    ctx->message_cache_size = 0;
-    deque_clear(ctx->message_cache, message_cache_cleaner, NULL);
     ctx->auth_decode_stage = 0;
     auth_decode_cache_clean(&ctx->auth_decode_cache);
     ctx->proxy_decode_stage = 0;
@@ -444,61 +429,53 @@ static void read_cb(struct bufferevent* event, void* arg) {
         return;
     }
 
-    int c = 1;
-    bool res = read_proxy_stage_message(event, ctx);
+    bool res = true;
     while (res) {
         res = read_proxy_stage_message(event, ctx);
-        log_debug("Loop time : %d", c++);
     }
 }
 
 
 static void read_auth_response(struct bufferevent* event, server_ctx_t* ctx) {
-    deque_t* deque = ctx->message_cache;
-    byte_buf_t* buffer;
-    if (deque_is_empty(deque)) {
-        buffer = byte_buf_new(256);
-    } else {
-        byte_buf_t* b = deque_pop_tail(deque);
-        if (byte_buf_is_full(b)) {
-            deque_offer_tail(deque, b);
-            buffer = byte_buf_new(4096);
-        } else {
-            buffer = b;
-        }
-    }
+    int* stage = &ctx->auth_decode_stage;
+    size_t readable = evbuffer_get_length(bufferevent_get_input(event));
 
-    int readable = byte_buf_event_read(buffer, event);
-    ctx->message_cache_size += readable;
-    deque_offer_tail(deque, buffer);
-
-    if (ctx->message_cache_size < FS_SERVER_AUTH_RESP_HEADER_LEN) {
+    if (*stage == 0 && readable < FS_SERVER_AUTH_RESP_HEADER_LEN) {
+        return;
+    } else if (*stage == 3 && readable < (&ctx->auth_decode_cache)->len) {
         return;
     }
 
-    buffer = deque_pop_head(deque);
-    assert(buffer != NULL);
-    ctx->message_cache_size -= byte_buf_readable_bytes(buffer);
-
-    int* stage = &ctx->auth_decode_stage;
-    auth_response_decode(buffer, &ctx->auth_decode_cache, stage);
-    if (*stage == -1) {
-        exit(FS_EXIT_AUTH_MSG_DECODE_ERROR);
-    } else if (*stage == FS_SERVER_AUTH_RESP_DECODE_FINISH_STAGE) {
+    if (*stage == 0) {
+        byte_buf_t* header = byte_buf_wrap(ctx->input_cache, FS_SERVER_AUTH_RESP_HEADER_LEN);
+        byte_buf_event_read(header, event);
+        auth_response_decode(header, &ctx->auth_decode_cache, stage);
+        if (*stage == 3) {
+            byte_buf_release(header);
+            return;
+        } else if (*stage == FS_SERVER_AUTH_RESP_DECODE_FINISH_STAGE) {
+            byte_buf_release(header);
+        } else {
+            exit(FS_EXIT_AUTH_MSG_DECODE_ERROR);
+        }
+    } else if (*stage == 3) {
         auth_response_t* result = &ctx->auth_decode_cache;
+        byte_buf_t* body = byte_buf_wrap(ctx->input_cache, result->len);
+        byte_buf_event_read(body, event);
+        auth_response_decode(body, &ctx->auth_decode_cache, stage);
+        byte_buf_release(body);
+    }
+
+    if (*stage == FS_SERVER_AUTH_RESP_DECODE_FINISH_STAGE) {
+        auth_response_t *result = &ctx->auth_decode_cache;
         if (!result->success) {
             log_error("Remote server authentication failure");
             exit(FS_EXIT_AUTH_FAILURE);
         } else {
             ctx->auth = true;
         }
-    }
-
-    if (byte_buf_readable_bytes(buffer) == 0) {
-        byte_buf_release(buffer);
-    } else {
-        ctx->message_cache_size += byte_buf_readable_bytes(buffer);
-        deque_offer_head(deque, buffer);
+    } else if (*stage == -1) {
+        exit(FS_EXIT_AUTH_MSG_DECODE_ERROR);
     }
 }
 
@@ -523,12 +500,9 @@ static bool read_proxy_stage_message(struct bufferevent* event, server_ctx_t* ct
         uint8_t type = stage_type(*stage);
         uint8_t step = stage_step(*stage);
 
-        log_debug("Proxy stage message TYPE: %X, STEP: %d", type, step);
-
         if (type == FS_SERVER_SVID_PROXY && step == FS_SERVER_PROXY_RESP_DECODE_FINISH_STAGE) {
             process_proxy_response(ctx);
             *stage = 0;
-            log_debug("Proxy response mlen: %d", (&ctx->proxy_decode_cache)->mlen);
             memset(&ctx->proxy_decode_cache, 0, sizeof(struct proxy_response_s));
         } else if (type == FS_SERVER_SVID_PING && step == FS_SERVER_PING_DECODE_FINISH_STAGE) {
             process_ping_message(ctx);
@@ -715,7 +689,6 @@ static inline void proxy_stage_message_decode(byte_buf_t* buffer, proxy_response
 
         stage_type_set(stage, svid);
         stage_step_set(stage, 1);
-        log_debug("Ready to decode SVID: %d", svid);
     }
 
     uint8_t type = stage_type(*stage);
