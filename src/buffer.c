@@ -30,6 +30,9 @@ struct byte_buf_s {
 
     // 写索引
     int32_t idx_write;
+
+    // memory是否是被包装的
+    bool wrap;
 };
 
 byte_buf_t* byte_buf_new(size_t size) {
@@ -55,6 +58,7 @@ byte_buf_t* byte_buf_new(size_t size) {
     buf->refcnt = 1;
     buf->idx_write = 0;
     buf->idx_read = 0;
+    buf->wrap = false;
     return buf;
 }
 
@@ -75,6 +79,7 @@ byte_buf_t* byte_buf_wrap(void* memory, size_t size) {
     buf->refcnt = 1;
     buf->idx_write = 0;
     buf->idx_read = 0;
+    buf->wrap = true;
     return buf;
 }
 
@@ -385,7 +390,9 @@ void byte_buf_release(byte_buf_t* buf) {
 
     refcnt--;
     if (refcnt == 0) {
-        free(buf->memory);
+        if (!buf->wrap) {
+            free(buf->memory);
+        }
         free(buf);
         return;
     }

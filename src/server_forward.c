@@ -17,9 +17,12 @@
 #define FS_SERVER_MAX_TRANSACTION 8192
 #endif
 
-
 #ifndef FS_SERVER_MESSAGE_MAX_LEN
 #define FS_SERVER_MESSAGE_MAX_LEN 20971520
+#endif
+
+#ifndef FS_SERVER_INPUT_CACHE_SIZE
+#define FS_SERVER_INPUT_CACHE_SIZE 8192
 #endif
 
 #define FS_SERVER_AUTH_MSG_HEADER {0x6C, 0x7A, 0x66}
@@ -192,6 +195,9 @@ struct server_ctx_s {
 
     // PONG消息解码缓存
     pong_t pong_cache;
+
+    // 代理阶段输入缓存
+    char input_cache[FS_SERVER_INPUT_CACHE_SIZE];
 };
 
 static inline uint8_t stage_type(uint64_t stage) {
@@ -498,71 +504,43 @@ static void read_auth_response(struct bufferevent* event, server_ctx_t* ctx) {
 
 
 static bool read_proxy_stage_message(struct bufferevent* event, server_ctx_t* ctx) {
-    struct evbuffer* evbuffer = bufferevent_get_input(event);
-    size_t evreadable = evbuffer_get_length(evbuffer);
-    //evbuffer_copyout();
-
-    deque_t* deque = ctx->message_cache;
-
-    // 从队列尾部取出未满的缓冲区，如果已满则构造新的缓冲区
-    byte_buf_t* buffer;
-    if (deque_is_empty(deque)) {
-        buffer = byte_buf_new(4096);
-    } else {
-        byte_buf_t* b = deque_pop_tail(deque);
-        if (byte_buf_is_full(b)) {
-            deque_offer_tail(deque, b);
-            buffer = byte_buf_new(4096);
-        } else {
-            buffer = b;
-        }
-    }
-
-    int readable = byte_buf_event_read(buffer, event);
-    log_debug("ByteBuf:%d EVbuf:%d", readable, evreadable);
-
-    ctx->message_cache_size += readable;
-    deque_offer_tail(deque, buffer);
-
-    if (readable == 0 && byte_buf_readable_bytes(buffer) == 0) {
+    size_t readable = evbuffer_get_length(bufferevent_get_input(event));
+    if (readable == 0) {
         return false;
     }
 
-    // 取出头部缓冲区并进行解码
-    buffer = deque_pop_head(deque);
-    ctx->message_cache_size -= byte_buf_readable_bytes(buffer);
+    // 构造静态缓冲区
+    byte_buf_t* buffer = byte_buf_wrap(ctx->input_cache,readable > FS_SERVER_INPUT_CACHE_SIZE ?
+                                        FS_SERVER_INPUT_CACHE_SIZE : readable);
+    byte_buf_event_read(buffer, event);
 
-    // 解码PING、PONG以及代理响应
-    uint64_t* stage = &ctx->proxy_decode_stage;
-    proxy_stage_message_decode(buffer, &ctx->proxy_decode_cache, &ctx->ping_cache, &ctx->pong_cache, stage);
+    while (byte_buf_readable_bytes(buffer) > 0) {
+        // 解码PING、PONG以及代理响应
+        uint64_t* stage = &ctx->proxy_decode_stage;
+        proxy_stage_message_decode(buffer, &ctx->proxy_decode_cache, &ctx->ping_cache, &ctx->pong_cache, stage);
 
-    // 分析解码类型和解码进度
-    uint8_t type = stage_type(*stage);
-    uint8_t step = stage_step(*stage);
+        // 分析解码类型和解码进度
+        uint8_t type = stage_type(*stage);
+        uint8_t step = stage_step(*stage);
 
-    log_debug("Proxy stage message TYPE: %X, STEP: %d", type, step);
+        log_debug("Proxy stage message TYPE: %X, STEP: %d", type, step);
 
-    if (type == FS_SERVER_SVID_PROXY && step == FS_SERVER_PROXY_RESP_DECODE_FINISH_STAGE) {
-        process_proxy_response(ctx);
-        *stage = 0;
-        memset(&ctx->proxy_decode_cache, 0, sizeof(struct proxy_response_s));
-    } else if (type == FS_SERVER_SVID_PING && step == FS_SERVER_PING_DECODE_FINISH_STAGE) {
-        process_ping_message(ctx);
-        *stage = 0;
-        memset(&ctx->ping_cache, 0, sizeof(struct ping_s));
-    } else if (type == FS_SERVER_SVID_PONG && step == FS_SERVER_PONG_DECODE_FINISH_STAGE) {
-        *stage = 0;
-        memset(&ctx->pong_cache, 0, sizeof(struct pong_s));
+        if (type == FS_SERVER_SVID_PROXY && step == FS_SERVER_PROXY_RESP_DECODE_FINISH_STAGE) {
+            process_proxy_response(ctx);
+            *stage = 0;
+            log_debug("Proxy response mlen: %d", (&ctx->proxy_decode_cache)->mlen);
+            memset(&ctx->proxy_decode_cache, 0, sizeof(struct proxy_response_s));
+        } else if (type == FS_SERVER_SVID_PING && step == FS_SERVER_PING_DECODE_FINISH_STAGE) {
+            process_ping_message(ctx);
+            *stage = 0;
+            memset(&ctx->ping_cache, 0, sizeof(struct ping_s));
+        } else if (type == FS_SERVER_SVID_PONG && step == FS_SERVER_PONG_DECODE_FINISH_STAGE) {
+            *stage = 0;
+            memset(&ctx->pong_cache, 0, sizeof(struct pong_s));
+        }
     }
-
-    if (byte_buf_readable_bytes(buffer) == 0 && byte_buf_writeable_bytes(buffer) < 1024) {
-        byte_buf_release(buffer);
-    } else {
-        ctx->message_cache_size += byte_buf_readable_bytes(buffer);
-        deque_offer_head(deque, buffer);
-    }
-
-    return true;
+    byte_buf_release(buffer);
+    return readable > FS_SERVER_INPUT_CACHE_SIZE ? true : false;
 }
 
 

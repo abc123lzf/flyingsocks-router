@@ -12,6 +12,8 @@ extern "C" {
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+
+#include <event2/buffer.h>
 #include <event2/bufferevent.h>
 
 typedef struct byte_buf_s byte_buf_t;
