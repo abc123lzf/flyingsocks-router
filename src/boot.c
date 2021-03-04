@@ -19,19 +19,55 @@ struct fs_ctx_s {
 
 typedef struct fs_ctx_s fs_ctx_t;
 
+/**
+ * 读取日志模块配置
+ * @param dest 配置结构体
+ * @param config_location 配置文件所在目录
+ */
 static void read_logger_config(logger_config_t* dest, const char* config_location);
+
+/**
+ * 读取本地服务配置
+ * @param dest 配置结构体
+ * @param config_location 配置文件所在目录
+ */
 static void read_service_config(service_config_t* dest, const char* config_location);
 
+/**
+ * 读取代理服务器配置
+ * @param dest 配置结构体
+ * @param config_location 配置文件所在目录
+ */
 static void read_server_config(server_config_t* dest, const char* config_location);
 static string_t* server_auth_argument_parse(char* username, char* password);
 
+/**
+ * 初始化PAC模块
+ * @param config_location IP白名单文件所在目录
+ * @param mode
+ */
+static void pac_module_initial(const char* config_location, int mode);
+
+/**
+ * 初始化各个模块并监听事件
+ */
 static void run_with_single_thread(service_config_t* service_config, server_config_t* server_config);
 
+/**
+ * SIGTERM信号处理函数
+ */
 static void sigterm_process_cb(int sig);
+
+/**
+ * Libevent日志信息回调函数
+ */
 static void event_log_callback_cb(int severity, const char *msg);
 
 static fs_ctx_t fs_ctx = {0};
 
+/**
+ * 命令行参数为配置文件路径，默认当前目录
+ */
 int main(int argc, char** argv) {
     fs_ctx.stop = false;
 
@@ -67,6 +103,8 @@ int main(int argc, char** argv) {
     server_config_t server_config;
     read_server_config(&server_config, config_path);
 
+    pac_module_initial(config_path, service_config.pac_mode);
+
     // 处理SIGTERM终止信号
     signal(SIGTERM, sigterm_process_cb);
 
@@ -77,6 +115,7 @@ int main(int argc, char** argv) {
 
 static void run_with_single_thread(service_config_t* service_config, server_config_t* server_config) {
     //struct event_base* evbase = event_base_new();
+
     service_ctx_t* service_ctx = proxy_service_init(service_config);
     direct_forward_ctx_t* direct_forward_ctx = direct_forward_init(service_ctx);
     server_ctx_t* server_ctx = server_forward_initial(server_config, service_ctx);
@@ -162,7 +201,7 @@ static void read_service_config(service_config_t* dest, const char* config_locat
 
     if (file == NULL) {
         log_warn("service.conf not found, using default config");
-        dest->pac_mode = FS_SERVICE_PAC_MODE_IP;
+        dest->pac_mode = FS_PAC_MODE_IP_WHITELIST;
         dest->enable_tcp = true;
         dest->tcp_port = FS_CFG_SERVICE_DEFAULT_TCP_PORT;
         dest->enable_udp = false;
@@ -188,8 +227,8 @@ static void read_service_config(service_config_t* dest, const char* config_locat
     dest->udp_port = cfg_getint(cfg, "proxy-udp-port");
 
     long pac_mode = cfg_getint(cfg, "proxy-auto-mode");
-    if (pac_mode != FS_SERVICE_PAC_MODE_NONE && pac_mode != FS_SERVICE_PAC_MODE_IP && pac_mode != FS_SERVICE_PAC_MODE_GLOBAL) {
-        dest->pac_mode = FS_SERVICE_PAC_MODE_IP;
+    if (pac_mode != FS_PAC_MODE_NO_PROXY && pac_mode != FS_PAC_MODE_IP_WHITELIST && pac_mode != FS_PAC_MODE_GLOBAL) {
+        dest->pac_mode = FS_PAC_MODE_IP_WHITELIST;
     } else {
         dest->pac_mode = (int) pac_mode;
     }
@@ -288,6 +327,21 @@ static string_t* server_auth_argument_parse(char* username, char* password) {
     string_t* result = string_new(cipher);
     free(cipher);
     return result;
+}
+
+static void pac_module_initial(const char* config_location, int mode) {
+    string_t* path = string_new(config_location);
+    if (string_get_last_char(path) != '/') {
+        string_append_char(path, '/');
+    }
+
+    string_append(path, FS_CFG_IP_WHITELIST);
+    bool res = pac_initial(string_get_content(path), mode);
+    if (!res) {
+        log_error("PAC Module initial failure");
+        exit(1);
+    }
+    string_free(path);
 }
 
 

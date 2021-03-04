@@ -23,6 +23,7 @@ extern "C" {
 #define FS_CFG_LOGGER_NAME "logger.conf"
 #define FS_CFG_SERVICE_NAME "service.conf"
 #define FS_CFG_SERVER_NAME "server.conf"
+#define FS_CFG_IP_WHITELIST "whitelist.txt"
 
 #define FS_CFG_SERVICE_DEFAULT_TCP_PORT 17020
 #define FS_CFG_SERVICE_DEFAULT_UDP_PORT 17021

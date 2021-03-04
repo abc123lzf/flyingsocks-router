@@ -7,11 +7,11 @@
 #include "logger.h"
 #include <stdlib.h>
 #include <netdb.h>
-#include <event2/bufferevent_ssl.h>
-#include <event2/buffer.h>
 #include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <event2/bufferevent_ssl.h>
 #include <assert.h>
-#include <arpa/inet.h>
+#include <signal.h>
 
 #ifndef FS_SERVER_MAX_TRANSACTION
 #define FS_SERVER_MAX_TRANSACTION 8192
@@ -23,6 +23,10 @@
 
 #ifndef FS_SERVER_INPUT_CACHE_SIZE
 #define FS_SERVER_INPUT_CACHE_SIZE 8192
+#endif
+
+#ifndef FS_SERVER_PROXY_MSG_CACHE_SIZE
+#define FS_SERVER_PROXY_MSG_CACHE_SIZE 65536
 #endif
 
 #define FS_SERVER_AUTH_MSG_HEADER {0x6C, 0x7A, 0x66}
@@ -57,6 +61,8 @@ static void process_ping_message(server_ctx_t* ctx);
 
 static void event_cb(struct bufferevent* bufferevent, short event, void* arg);
 static void send_auth_request(server_ctx_t* ctx, struct bufferevent* bufferevent);
+
+static bool submit_ping_task(server_ctx_t* ctx);
 
 
 const static char auth_msg_header[] = FS_SERVER_AUTH_MSG_HEADER;
@@ -118,7 +124,7 @@ struct proxy_response_s {
 
 #define FS_SERVER_PROXY_RESP_DECODE_FINISH_STAGE 6
 
-static void proxy_response_decode(byte_buf_t* buffer, proxy_response_t* response, uint64_t* stage);
+static void proxy_response_decode(byte_buf_t* buffer, proxy_response_t* response, uint64_t* stage, char* cache);
 
 #define FS_SERVER_PING_CONTENT "PING"
 struct ping_s {
@@ -143,7 +149,7 @@ const static ping_t PING = {FS_SERVER_SVID_PING, 4, FS_SERVER_PING_CONTENT};
 const static pong_t PONG = {FS_SERVER_SVID_PONG, 4, FS_SERVER_PONG_CONTENT};
 
 static void proxy_stage_message_decode(byte_buf_t* buffer, proxy_response_t* response,
-                                       ping_t* ping, pong_t* pong, uint64_t* stage);
+                                       ping_t* ping, pong_t* pong, uint64_t* stage, char* cache);
 
 struct server_ctx_s {
     // 服务器配置
@@ -157,6 +163,9 @@ struct server_ctx_s {
 
     // 与服务端连接产生的bufferevent
     struct bufferevent* event;
+
+    // SSL通信组件
+    struct ssl_st* ssl_st;
 
     // 下一个事务ID
     uint32_t next_tid;
@@ -191,6 +200,9 @@ struct server_ctx_s {
 
     // 代理阶段输入缓存
     char input_cache[FS_SERVER_INPUT_CACHE_SIZE];
+
+    // 代理消息响应内容缓存
+    char proxy_message_cache[FS_SERVER_PROXY_MSG_CACHE_SIZE];
 };
 
 static inline uint8_t stage_type(uint64_t stage) {
@@ -264,8 +276,29 @@ server_ctx_t* server_forward_initial(server_config_t *config, service_ctx_t* ser
         free(ctx);
         return NULL;
     }
+
+    submit_ping_task(ctx);
     return ctx;
 }
+
+
+static struct ssl_st* ssl_st_create() {
+    static SSL_CTX* ctx = NULL;
+    if (ctx == NULL) {
+        SSL_library_init();
+        OpenSSL_add_all_algorithms();
+        ERR_load_crypto_strings();
+        SSL_load_error_strings();
+        ctx = SSL_CTX_new(TLSv1_2_client_method());
+        if (ctx == NULL) {
+            log_error("TLS v1.2 Not support.");
+            exit(FS_EXIT_SSL_NOT_SUPPORT);
+        }
+    }
+
+    return SSL_new(ctx);
+}
+
 
 void server_forward_run(server_ctx_t *ctx) {
     event_base_loop(ctx->event_base, EVLOOP_NONBLOCK);
@@ -284,7 +317,19 @@ static bool server_connect(server_ctx_t* ctx) {
     char* hostname = config->hostname;
     uint16_t port = config->port;
 
-    struct bufferevent* event = bufferevent_socket_new(ctx->event_base, -1, BEV_OPT_CLOSE_ON_FREE);
+    if (ctx->ssl_st != NULL) {
+        SSL_free(ctx->ssl_st);
+        ctx->ssl_st = NULL;
+    }
+
+    struct bufferevent* event = NULL;
+    if (config->encrypt_type == ENCRYPT_TYPE_OPENSSL) {
+        ctx->ssl_st = ssl_st_create();
+        event = bufferevent_openssl_socket_new(ctx->event_base, -1, ctx->ssl_st, BUFFEREVENT_SSL_CONNECTING, BEV_OPT_CLOSE_ON_FREE);
+    } else {
+        event = bufferevent_socket_new(ctx->event_base, -1, BEV_OPT_CLOSE_ON_FREE);
+    }
+
     if (event == NULL) {
         return false;
     }
@@ -381,7 +426,7 @@ static void client_ctx_request_cb(byte_buf_t* buffer, void* arg) {
     proxy_protocol_t protocol = client_ctx_get_proxy_protocol(client_ctx);
 
     struct proxy_request_s request;
-    proxy_request_build(&request, tid, host, protocol == TCP ? FS_SERVER_PROXY_REQ_TYPE_TCP : FS_SERVER_PROXY_REQ_TYPE_UDP,
+    proxy_request_build(&request, tid, host, protocol == PROTOCOL_TCP ? FS_SERVER_PROXY_REQ_TYPE_TCP : FS_SERVER_PROXY_REQ_TYPE_UDP,
                         ntohs(target_addr->sin_port), buffer);
     proxy_request_transfer(ctx->event, &request);
     byte_buf_release(buffer);
@@ -494,7 +539,7 @@ static bool read_proxy_stage_message(struct bufferevent* event, server_ctx_t* ct
     while (byte_buf_readable_bytes(buffer) > 0) {
         // 解码PING、PONG以及代理响应
         uint64_t* stage = &ctx->proxy_decode_stage;
-        proxy_stage_message_decode(buffer, &ctx->proxy_decode_cache, &ctx->ping_cache, &ctx->pong_cache, stage);
+        proxy_stage_message_decode(buffer, &ctx->proxy_decode_cache, &ctx->ping_cache, &ctx->pong_cache, stage, ctx->proxy_message_cache);
 
         // 分析解码类型和解码进度
         uint8_t type = stage_type(*stage);
@@ -564,8 +609,14 @@ static void event_cb(struct bufferevent* bufferevent, short event, void* arg) {
         return;
     }
 
-    if (event & BEV_EVENT_ERROR) {
-        log_warn("Proxy server connection socket error, message: %s", evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR()));
+    // 断线重连
+    if (event & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
+        ctx->connect = false;
+        ctx->auth = false;
+        log_warn("Proxy server connection error, ERROR CODE: %s", evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR()));
+        bufferevent_free(bufferevent);
+        server_connect(ctx);
+        return;
     }
 
     if (event & BEV_EVENT_EOF) {
@@ -573,6 +624,7 @@ static void event_cb(struct bufferevent* bufferevent, short event, void* arg) {
         ctx->auth = false;
         bufferevent_free(bufferevent);
         ctx->event = NULL;
+        raise(SIGTERM);
     } else if (event & BEV_EVENT_TIMEOUT) {
         ctx->connect = false;
         ctx->auth = false;
@@ -670,7 +722,7 @@ static void auth_response_decode(byte_buf_t* buffer, auth_response_t* dest, int*
 
 
 static inline void proxy_stage_message_decode(byte_buf_t* buffer, proxy_response_t* response,
-                                       ping_t* ping, pong_t* pong, uint64_t* stage) {
+                                       ping_t* ping, pong_t* pong, uint64_t* stage, char* cache) {
     uint8_t step = stage_step(*stage);
     if (step == 0) {
         // 提取服务ID，设置stage的type位为服务ID
@@ -693,7 +745,7 @@ static inline void proxy_stage_message_decode(byte_buf_t* buffer, proxy_response
 
     uint8_t type = stage_type(*stage);
     if (type == FS_SERVER_SVID_PROXY) {
-        proxy_response_decode(buffer, response, stage);
+        proxy_response_decode(buffer, response, stage, cache);
     } else if (type == FS_SERVER_SVID_PING) {
         ping_decode(buffer, ping, stage);
     } else if (type == FS_SERVER_SVID_PONG) {
@@ -754,7 +806,7 @@ static inline bool proxy_message_decode_string(byte_buf_t* buffer, char* dest, u
 }
 
 
-static inline void proxy_response_decode(byte_buf_t* buffer, proxy_response_t* response, uint64_t* stage) {
+static inline void proxy_response_decode(byte_buf_t* buffer, proxy_response_t* response, uint64_t* stage, char* cache) {
     uint8_t step = stage_step(*stage);
     if (step == 1) {
         bool res = proxy_message_decode_uint32(buffer, &response->len, stage);
@@ -804,7 +856,7 @@ static inline void proxy_response_decode(byte_buf_t* buffer, proxy_response_t* r
         uint32_t mlen = response->mlen;
         assert(response->len == mlen + 1 + 4 + 4);
         if (response->msg == NULL) {
-            response->msg = byte_buf_new(mlen);
+            response->msg = mlen <= FS_SERVER_PROXY_MSG_CACHE_SIZE ? byte_buf_wrap(cache, mlen) : byte_buf_new(mlen);
         }
 
         bool res = proxy_message_decode_msg(buffer, response->msg, stage, mlen);
@@ -862,7 +914,7 @@ static void pong_decode(byte_buf_t* buffer, pong_t* pong, uint64_t* stage) {
             return;
         }
         stage_decoded_length_set(stage, 0);
-        assert(strcmp(pong->content, FS_SERVER_PING_CONTENT) == 0);
+        assert(strcmp(pong->content, FS_SERVER_PONG_CONTENT) == 0);
         stage_step_set(stage, ++step);
     }
 }
@@ -899,4 +951,35 @@ static void proxy_request_transfer(struct bufferevent* event, proxy_request_t* r
     }
 
     byte_buf_release(header);
+}
+
+static void ping_task(evutil_socket_t fd, short event, void* arg) {
+    server_ctx_t* ctx = (server_ctx_t*) arg;
+    if (!ctx->connect || !ctx->auth || ctx->event == NULL) {
+        return;
+    }
+
+    byte_buf_t* buffer = byte_buf_new(sizeof(struct ping_s) - 1);
+    byte_buf_write_char(buffer, PING.svid);
+    byte_buf_write_int(buffer, PING.len);
+    byte_buf_write_string(buffer, PING.content, sizeof(PING.content) - 1);
+    byte_buf_event_write(buffer, ctx->event);
+    byte_buf_release(buffer);
+}
+
+static bool submit_ping_task(server_ctx_t* ctx) {
+    struct event_base* base = ctx->event_base;
+    struct event* event = event_new(base, -1, EV_PERSIST, ping_task, ctx);
+    if (event == NULL) {
+        return false;
+    }
+
+    struct timeval timeout;
+    timeout.tv_sec = 15;
+    timeout.tv_usec = 0;
+    int res = event_add(event, &timeout);
+    if (res != 0) {
+        return false;
+    }
+    return true;
 }

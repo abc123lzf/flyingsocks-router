@@ -19,7 +19,7 @@
 struct service_ctx_s {
     struct event_base* event_base;
 
-    // TCP 本地代理服务套接字
+    // PROTOCOL_TCP 本地代理服务套接字
     int tcp_socket_fd;
 
     // client_ctx订阅者
@@ -163,9 +163,9 @@ static void tcp_accept_cb(int fd, short events, void* arg) {
 
     int client_fd = accept(fd, (struct sockaddr*)&client, &len);
     evutil_make_socket_nonblocking(client_fd);
-
+#ifdef DEBUG
     log_trace("[service.c/tcp_accept_cb] Accept client FD:%d", client_fd);
-
+#endif
     struct sockaddr_in target_addr;
     socklen_t socklen = sizeof(struct sockaddr_in);
     if (getsockopt(client_fd, SOL_IP, SO_ORIGINAL_DST, &target_addr, &socklen) != 0) {
@@ -177,7 +177,7 @@ static void tcp_accept_cb(int fd, short events, void* arg) {
     service_ctx_t* ctx = (service_ctx_t*) arg;
     struct bufferevent* bev = bufferevent_socket_new(ctx->event_base, client_fd, BEV_OPT_CLOSE_ON_FREE);
 
-    client_ctx_t* client_ctx = client_ctx_new(ctx, &target_addr, bev, TCP);
+    client_ctx_t* client_ctx = client_ctx_new(ctx, &target_addr, bev, PROTOCOL_TCP);
     if (client_ctx == NULL) {
         log_error("Could NOT create client_ctx");
         bufferevent_free(bev);
@@ -218,9 +218,9 @@ static void tcp_read_cb(struct bufferevent* event, void* arg) {
 
     byte_buf_t* buf = byte_buf_new(4096);
     int read_len = byte_buf_event_read(buf, event);
-
+#ifdef DEBUG
     log_trace("[service.c/tcp_read_cb] Read message, capacity: %d", read_len);
-
+#endif
     int res = msg_deliver_transfer(client_ctx->msg_deliverer, buf);
     byte_buf_release(buf);
     if (res != 0) {
@@ -325,6 +325,9 @@ proxy_protocol_t client_ctx_get_proxy_protocol(client_ctx_t* ctx) {
 }
 
 int client_ctx_write_data(client_ctx_t* ctx, byte_buf_t* buf) {
+    if (ctx->close) {
+        return -1;
+    }
     int res = byte_buf_event_write(buf, ctx->event);
     if (res < 0) {
         log_error("[client_ctx_write_data] Could not write data, CODE: %d", res);

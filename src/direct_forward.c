@@ -49,7 +49,7 @@ void direct_forward_stop(direct_forward_ctx_t* ctx) {
 static void client_ctx_accept_cb(client_ctx_t* client_ctx, void* arg) {
     direct_forward_ctx_t* ctx = (direct_forward_ctx_t*) arg;
 
-    if (client_ctx_get_proxy_protocol(client_ctx) == TCP) {
+    if (client_ctx_get_proxy_protocol(client_ctx) == PROTOCOL_TCP) {
         struct bufferevent* event = bufferevent_socket_new(ctx->event_base, -1, BEV_OPT_CLOSE_ON_FREE);
         struct sockaddr_in* target_addr = client_ctx_get_target_server_address(client_ctx);
 
@@ -60,12 +60,6 @@ static void client_ctx_accept_cb(client_ctx_t* client_ctx, void* arg) {
             return;
         }
 
-#ifdef DEBUG
-        int fd = bufferevent_getfd(event);
-        struct sockaddr_in local_addr;
-        socklen_t capacity = sizeof(struct sockaddr_in);
-        getsockname(fd, (struct sockaddr *) &local_addr, &capacity);
-#endif
         bufferevent_setcb(event, tcp_read_cb, NULL, tcp_event_cb, client_ctx);
         res = bufferevent_enable(event, EV_READ | EV_PERSIST);
         if (res != 0) {
