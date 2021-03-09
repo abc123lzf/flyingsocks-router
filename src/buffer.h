@@ -21,6 +21,8 @@ typedef struct byte_buf_s byte_buf_t;
 extern byte_buf_t* byte_buf_new(size_t size);
 extern byte_buf_t* byte_buf_wrap(void* memory, size_t size);
 
+extern bool byte_buf_set_write_index(byte_buf_t* buf, int32_t index);
+
 extern bool byte_buf_is_full(byte_buf_t* buf);
 
 extern int byte_buf_fd_read(byte_buf_t* buf, int fd);
@@ -32,7 +34,7 @@ extern int32_t byte_buf_writeable_bytes(byte_buf_t* buf);
 
 extern bool byte_buf_write_byte(byte_buf_t* buf, uint8_t b);
 extern bool byte_buf_write_char(byte_buf_t* buf, char c);
-extern bool byte_buf_write_string(byte_buf_t* buf, const char* string, int length);
+extern bool byte_buf_write_chars(byte_buf_t* buf, const char* string, int length);
 extern bool byte_buf_write_short(byte_buf_t* buf, int16_t number);
 extern bool byte_buf_write_ushort(byte_buf_t* buf, uint16_t number);
 extern bool byte_buf_write_int(byte_buf_t* buf, int32_t number);
@@ -46,7 +48,8 @@ extern bool byte_buf_read_ushort(byte_buf_t* buf, uint16_t* dst);
 extern bool byte_buf_read_int(byte_buf_t* buf, int32_t* dst);
 extern bool byte_buf_read_uint(byte_buf_t* buf, uint32_t* dst);
 extern bool byte_buf_read_long(byte_buf_t* buf, int64_t* dst);
-extern bool byte_buf_read_string(byte_buf_t* buf, char* dst, int length);
+extern bool byte_buf_read_chars(byte_buf_t* buf, char* dst, int length);
+extern bool byte_buf_read_string(byte_buf_t* buf, char* dst, size_t dst_size);
 
 extern bool byte_buf_transfer(byte_buf_t* src, byte_buf_t* dst, int length);
 

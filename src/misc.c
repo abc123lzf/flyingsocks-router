@@ -5,6 +5,7 @@
 #include "logger.h"
 #include <stdlib.h>
 #include <iconv.h>
+#include <assert.h>
 
 struct msg_deliver_receiver_s {
     // 消息接收回调
@@ -162,13 +163,12 @@ string_t *string_new(const char *src) {
     }
 
     size_t len = strlen(src);
-    char *copy = malloc(len + 1);
+    char *copy = strdup(src);
     if (copy == NULL) {
         free(string);
         return NULL;
     }
 
-    strcpy(copy, src);
     string->memory = copy;
     string->length = len;
     string->size = len + 1;
@@ -503,4 +503,82 @@ char* base64_decode(char *cipher) {
 
     plain[p] = '\0';
     return plain;
+}
+
+
+static inline bool message_decode_uint16_internal(byte_buf_t* buffer, uint16_t* dest, uint32_t* hasread_addr, bool le) {
+    int32_t readable = byte_buf_readable_bytes(buffer);
+    uint32_t hasread = *hasread_addr;
+
+    void* addr = (void*) dest;
+    if (hasread + readable >= sizeof(uint16_t)) {
+        byte_buf_read_bytes(buffer, addr + hasread, sizeof(uint16_t) - hasread);
+        if (!le) {
+            *dest = ntohs(*dest);
+        }
+        *hasread_addr = sizeof(uint16_t);
+        return true;
+    } else {
+        byte_buf_read_bytes(buffer, addr + hasread, readable);
+        *hasread_addr = hasread + readable;
+        return false;
+    }
+}
+
+
+bool message_decode_uint16(byte_buf_t* buffer, uint16_t* dest, uint32_t* hasread_addr) {
+    return message_decode_uint16_internal(buffer, dest, hasread_addr, false);
+}
+
+bool message_decode_uint16_le(byte_buf_t* buffer, uint16_t* dest, uint32_t* hasread_addr) {
+    return message_decode_uint16_internal(buffer, dest, hasread_addr, true);
+}
+
+bool message_decode_uint32(byte_buf_t* buffer, uint32_t* dest, uint32_t* hasread_addr) {
+    int32_t readable = byte_buf_readable_bytes(buffer);
+    uint32_t hasread = *hasread_addr;
+    void* addr = (void*) dest;
+    if (hasread + readable >= sizeof(uint32_t)) {
+        byte_buf_read_bytes(buffer, addr + hasread, sizeof(uint32_t) - hasread);
+        *dest = ntohl(*dest);
+        *hasread_addr = sizeof(uint32_t);
+        return true;
+    } else {
+        byte_buf_read_bytes(buffer, addr + hasread, readable);
+        *hasread_addr = hasread + readable;
+        return false;
+    }
+}
+
+bool message_decode_bytes(byte_buf_t* buffer, byte_buf_t* dest, uint32_t* hasread_addr, uint32_t mlen) {
+    int32_t readable = byte_buf_readable_bytes(buffer);
+    uint32_t hasread = *hasread_addr;
+    if (hasread + readable >= mlen) {
+        bool res = byte_buf_transfer(buffer, dest, mlen - hasread);
+        assert(res);
+        *hasread_addr = mlen;
+        return true;
+    } else {
+        bool res = byte_buf_transfer(buffer, dest, readable);
+        assert(res);
+        *hasread_addr = hasread + readable;
+        assert(byte_buf_readable_bytes(dest) == hasread + readable);
+        return false;
+    }
+}
+
+bool message_decode_string(byte_buf_t* buffer, char* dest, uint32_t* hasread_addr, uint32_t mlen) {
+    int32_t readable = byte_buf_readable_bytes(buffer);
+    int32_t hasread = *hasread_addr;
+    if (hasread + readable >= mlen) {
+        bool res = byte_buf_read_chars(buffer, dest, (int32_t) mlen - hasread);
+        assert(res);
+        *hasread_addr = mlen;
+        return true;
+    } else {
+        bool res = byte_buf_read_chars(buffer, dest + hasread, readable);
+        assert(res);
+        *hasread_addr = hasread + readable;
+        return false;
+    }
 }

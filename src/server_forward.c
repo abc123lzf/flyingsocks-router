@@ -17,6 +17,10 @@
 #define FS_SERVER_MAX_TRANSACTION 8192
 #endif
 
+#ifndef FS_SERVER_MAX_DNS_TRANSACTION
+#define FS_SERVER_MAX_DNS_TRANSACTION 2048
+#endif
+
 #ifndef FS_SERVER_MESSAGE_MAX_LEN
 #define FS_SERVER_MESSAGE_MAX_LEN 20971520
 #endif
@@ -25,13 +29,14 @@
 #define FS_SERVER_INPUT_CACHE_SIZE 8192
 #endif
 
-#ifndef FS_SERVER_PROXY_MSG_CACHE_SIZE
-#define FS_SERVER_PROXY_MSG_CACHE_SIZE 65536
+#ifndef FS_SERVER_OUTPUT_CACHE_SIZE
+#define FS_SERVER_OUTPUT_CACHE_SIZE 65536
 #endif
 
 #define FS_SERVER_AUTH_MSG_HEADER {0x6C, 0x7A, 0x66}
 #define FS_SERVER_AUTH_MSG_HEADER_LEN 3
-#define FS_SERVER_SVID_PROXY 0
+#define FS_SERVER_SVID_PROXY 0x00
+#define FS_SERVER_SVID_DNS 0x01
 #define FS_SERVER_SVID_PING 0x7F
 #define FS_SERVER_SVID_PONG 0x7E
 
@@ -58,6 +63,7 @@ static void read_auth_response(struct bufferevent* event, server_ctx_t* ctx);
 static bool read_proxy_stage_message(struct bufferevent* event, server_ctx_t* ctx);
 static void process_proxy_response(server_ctx_t* ctx);
 static void process_ping_message(server_ctx_t* ctx);
+static void process_dns_response(server_ctx_t* ctx);
 
 static void event_cb(struct bufferevent* bufferevent, short event, void* arg);
 static void send_auth_request(server_ctx_t* ctx, struct bufferevent* bufferevent);
@@ -93,6 +99,9 @@ static void auth_response_decode(byte_buf_t* buffer, auth_response_t* dest, int*
 #define FS_SERVER_AUTH_RESP_HEADER_LEN (FS_SERVER_AUTH_MSG_HEADER_LEN * sizeof(int8_t) + sizeof(int8_t) + sizeof(uint16_t))
 #define FS_SERVER_AUTH_RESP_DECODE_FINISH_STAGE 4
 
+/*
+ * 代理请求
+ * */
 struct proxy_request_s {
     int8_t svid;
     uint32_t len;
@@ -113,6 +122,9 @@ static void proxy_request_transfer(struct bufferevent* event, proxy_request_t* r
 #define FS_SERVER_PROXY_REQ_TYPE_UDP 0x40
 #define FS_SERVER_PROXY_REQ_TYPE_CLOSE 0x20
 
+/*
+ * 代理响应
+ * */
 struct proxy_response_s {
     int8_t svid;
     uint32_t len;
@@ -125,6 +137,7 @@ struct proxy_response_s {
 #define FS_SERVER_PROXY_RESP_DECODE_FINISH_STAGE 6
 
 static void proxy_response_decode(byte_buf_t* buffer, proxy_response_t* response, uint64_t* stage, char* cache);
+
 
 #define FS_SERVER_PING_CONTENT "PING"
 struct ping_s {
@@ -148,8 +161,63 @@ static void pong_decode(byte_buf_t* buffer, pong_t* pong, uint64_t* stage);
 const static ping_t PING = {FS_SERVER_SVID_PING, 4, FS_SERVER_PING_CONTENT};
 const static pong_t PONG = {FS_SERVER_SVID_PONG, 4, FS_SERVER_PONG_CONTENT};
 
+struct dns_question_s {
+    char* name;
+    uint16_t type;
+    uint16_t class;
+};
+
+typedef struct dns_question_s dns_question_t;
+
+struct dns_record_s {
+    char* domain;
+    uint16_t type;
+    uint16_t class;
+    uint32_t ttl;
+    uint16_t data_len;
+    byte_buf_t* data;
+};
+
+typedef struct dns_record_s dns_record_t;
+
+struct dns_request_s {
+    int8_t svid;
+    uint32_t len;
+    uint16_t tid;
+    uint16_t flag;
+    uint16_t question_cnt;
+    uint16_t answer_cnt;
+    uint16_t authority_cnt;
+    uint16_t additional_info_cnt;
+    dns_question_t questions[32];
+};
+
+typedef struct dns_request_s dns_request_t;
+
+static void dns_request_build(dns_request_t* request, uint16_t tid, uint16_t flag,
+                              dns_question_t* questions, int question_cnt);
+static void send_dns_request(struct bufferevent* event, dns_request_t* request, char* output_cache);
+
+struct dns_response_s {
+    int8_t svid;
+    uint32_t len;
+    uint16_t tid;
+    uint16_t flag;
+    uint16_t question_cnt;
+    uint16_t answer_cnt;
+    uint16_t authority_cnt;
+    uint16_t additional_info_cnt;
+    dns_record_t answers[32];
+    dns_record_t authority[32];
+    dns_record_t additional_info[32];
+};
+#define FS_SERVER_DNS_RESP_DECODE_FINISH_STAGE 9
+typedef struct dns_response_s dns_response_t;
+
+static void dns_response_decode(byte_buf_t* buffer, dns_response_t* response, uint64_t* stage, void* cache);
+
 static void proxy_stage_message_decode(byte_buf_t* buffer, proxy_response_t* response,
-                                       ping_t* ping, pong_t* pong, uint64_t* stage, char* cache);
+                                       ping_t* ping, pong_t* pong, dns_response_t* dns_response, uint64_t* stage, char* cache);
 
 struct server_ctx_s {
     // 服务器配置
@@ -157,6 +225,9 @@ struct server_ctx_s {
 
     // 本地代理服务上下文
     service_ctx_t* service_ctx;
+
+    // DNS服务上下文
+    dns_ctx_t* dns_service_ctx;
 
     // event base
     struct event_base* event_base;
@@ -198,11 +269,22 @@ struct server_ctx_s {
     // PONG消息解码缓存
     pong_t pong_cache;
 
+    // DNS响应解码缓存
+    dns_response_t dns_decode_cache;
+
+    // 下一个DNS事务ID
+    uint32_t dns_next_tid;
+
+    // DNS事务与ID映射关系
+    dns_client_ctx_t* dns_transactions[FS_SERVER_MAX_DNS_TRANSACTION];
+
     // 代理阶段输入缓存
+    // 代理服务器 --> 程序
     char input_cache[FS_SERVER_INPUT_CACHE_SIZE];
 
-    // 代理消息响应内容缓存
-    char proxy_message_cache[FS_SERVER_PROXY_MSG_CACHE_SIZE];
+    // 代理阶段输出缓存
+    // 程序 --> 代理服务器 || 程序 --> 代理请求方
+    char output_cache[FS_SERVER_OUTPUT_CACHE_SIZE];
 };
 
 static inline uint8_t stage_type(uint64_t stage) {
@@ -251,12 +333,40 @@ static inline void proxy_decode_cache_clean(proxy_response_t* cache) {
     memset(cache, 0, sizeof(struct proxy_response_s));
 }
 
-
-server_ctx_t* server_forward_initial(server_config_t *config, service_ctx_t* service_ctx) {
-    if (config == NULL || service_ctx == NULL) {
-        return NULL;
+static inline void dns_decode_cache_clean(dns_response_t* cache) {
+    for (int i = 0; i < cache->answer_cnt; i++) {
+        dns_record_t* record = &cache->answers[i];
+        if (record->data != NULL) {
+            byte_buf_release(record->data);
+        }
+        free(record->domain);
     }
 
+    for (int i = 0; i < cache->authority_cnt; i++) {
+        dns_record_t* record = &cache->authority[i];
+        if (record->data != NULL) {
+            byte_buf_release(record->data);
+        }
+        free(record->domain);
+    }
+
+    for (int i = 0; i < cache->additional_info_cnt; i++) {
+        dns_record_t* record = &cache->additional_info[i];
+        if (record->data != NULL) {
+            byte_buf_release(record->data);
+        }
+        free(record->domain);
+    }
+    memset(cache, 0, sizeof(struct dns_response_s));
+}
+
+
+server_ctx_t* server_forward_initial(server_config_t *config, service_ctx_t* service_ctx,
+                                     dns_ctx_t* dns_service_ctx, struct event_base* event_base) {
+    if (config == NULL || service_ctx == NULL || dns_service_ctx == NULL || event_base == NULL) {
+        return NULL;
+    }
+#ifdef FS_SERVER_USE_DYNAMIC_CTX
     server_ctx_t* ctx = calloc(sizeof(server_ctx_t), 1);
     if (ctx == NULL) {
         return NULL;
@@ -264,13 +374,8 @@ server_ctx_t* server_forward_initial(server_config_t *config, service_ctx_t* ser
 
     ctx->config = config;
     ctx->service_ctx = service_ctx;
-    struct event_base* base = event_base_new();
-    if (base == NULL) {
-        free(ctx);
-        return NULL;
-    }
-
-    ctx->event_base = base;
+    ctx->dns_service_ctx = dns_service_ctx;
+    ctx->event_base = event_base;
 
     if (!server_connect(ctx)) {
         free(ctx);
@@ -279,6 +384,27 @@ server_ctx_t* server_forward_initial(server_config_t *config, service_ctx_t* ser
 
     submit_ping_task(ctx);
     return ctx;
+#else
+    static bool initial = false;
+    static server_ctx_t ctx = {0};
+
+    if (initial) {
+        return &ctx;
+    }
+
+    ctx.config = config;
+    ctx.service_ctx = service_ctx;
+    ctx.dns_service_ctx = dns_service_ctx;
+    ctx.event_base = event_base;
+
+    if (!server_connect(&ctx)) {
+        return NULL;
+    }
+
+    submit_ping_task(&ctx);
+    initial = true;
+    return &ctx;
+#endif
 }
 
 
@@ -308,6 +434,7 @@ void server_forward_stop(server_ctx_t *ctx) {
     bufferevent_free(ctx->event);
     auth_decode_cache_clean(&ctx->auth_decode_cache);
     proxy_decode_cache_clean(&ctx->proxy_decode_cache);
+    dns_decode_cache_clean(&ctx->dns_decode_cache);
     event_base_free(ctx->event_base);
     free(ctx);
 }
@@ -345,10 +472,18 @@ static bool server_connect(server_ctx_t* ctx) {
         }
     }
 
+    for (int i = 0; i < FS_SERVER_MAX_DNS_TRANSACTION; i++) {
+        dns_client_ctx_t* client_ctx = ctx->dns_transactions[i];
+        if (client_ctx != NULL) {
+            dns_service_client_ctx_discard(client_ctx);
+        }
+    }
+
     ctx->auth_decode_stage = 0;
     auth_decode_cache_clean(&ctx->auth_decode_cache);
     ctx->proxy_decode_stage = 0;
     proxy_decode_cache_clean(&ctx->proxy_decode_cache);
+    dns_decode_cache_clean(&ctx->dns_decode_cache);
 
     int res = bufferevent_socket_connect_hostname(event, NULL, AF_UNSPEC, hostname, port);
     if (res != 0) {
@@ -443,7 +578,7 @@ static void client_ctx_close_cb(void* arg) {
         goto finally;
     }
 
-    if (!ctx->connect) {
+    if (!ctx->connect || !ctx->auth) {
         goto finally;
     }
 
@@ -462,6 +597,74 @@ finally:
 }
 
 
+static void dns_client_ctx_request_cb(dns_client_ctx_t* client_ctx, void* arg) {
+    server_ctx_t* ctx = (server_ctx_t*) arg;
+    if (!ctx->connect || !ctx->auth) {
+        dns_service_client_ctx_discard(client_ctx);
+        return;
+    }
+
+    dns_client_request_t* req = dns_service_client_ctx_get_request(client_ctx);
+    uint16_t flag = (uint16_t) req->flags;
+    int question_cnt = req->nquestions;
+
+    dns_question_t questions[32];
+    for (int i = 0; i < question_cnt; i++) {
+        questions[i].name = req->questions[i]->name;
+        questions[i].class = req->questions[i]->class;
+        questions[i].type = req->questions[i]->type;
+    }
+
+    uint16_t tid = ctx->dns_next_tid;
+    if (ctx->dns_transactions[tid] != NULL) {
+        dns_service_client_ctx_discard(ctx->dns_transactions[tid]);
+    }
+
+    if (tid == FS_SERVER_MAX_DNS_TRANSACTION - 1) {
+        ctx->dns_next_tid = 0;
+    } else {
+        ctx->dns_next_tid = tid + 1;
+    }
+
+    ctx->dns_transactions[tid] = client_ctx;
+    dns_request_t request;
+    dns_request_build(&request, tid, flag, questions, question_cnt);
+    send_dns_request(ctx->event, &request, ctx->output_cache);
+}
+
+
+static inline void send_dns_request(struct bufferevent* event, dns_request_t* request, char* output_cache) {
+    byte_buf_t* buf = byte_buf_wrap(output_cache, FS_SERVER_OUTPUT_CACHE_SIZE);
+    byte_buf_write_char(buf, request->svid);
+    byte_buf_write_int(buf, request->len);
+    byte_buf_write_ushort(buf, request->tid);
+
+#ifdef __BIG_ENDIAN__
+    byte_buf_write_ushort(buf, request->flag);
+#else
+    byte_buf_write_byte(buf, request->flag);
+    byte_buf_write_byte(buf, *(&request->flag + 1));
+#endif
+    byte_buf_write_ushort(buf, request->question_cnt);
+    byte_buf_write_ushort(buf, request->answer_cnt);
+    byte_buf_write_ushort(buf, request->authority_cnt);
+    byte_buf_write_ushort(buf, request->additional_info_cnt);
+
+    for (int i = 0; i < request->question_cnt; ++i) {
+        dns_question_t* question = &request->questions[i];
+        size_t len = strlen(question->name);
+        byte_buf_write_chars(buf, question->name, len);
+        byte_buf_write_char(buf, '\0');
+        byte_buf_write_ushort(buf, question->type);
+        byte_buf_write_ushort(buf, question->class);
+    }
+
+    assert(byte_buf_readable_bytes(buf) == request->len + sizeof(request->len) + sizeof(request->svid));
+    byte_buf_event_write(buf, event);
+    byte_buf_release(buf);
+}
+
+
 static void read_cb(struct bufferevent* event, void* arg) {
     server_ctx_t* ctx = (server_ctx_t*) arg;
     if (!ctx->auth) {
@@ -470,6 +673,7 @@ static void read_cb(struct bufferevent* event, void* arg) {
         if (ctx->auth) {
             log_info("Proxy server auth success");
             proxy_service_register_client_ctx_publish_cb(ctx->service_ctx, client_ctx_accept_cb, true, ctx);
+            dns_service_register_client_ctx_publish_cb(ctx->dns_service_ctx, dns_client_ctx_request_cb, ctx);
         }
         return;
     }
@@ -514,7 +718,7 @@ static void read_auth_response(struct bufferevent* event, server_ctx_t* ctx) {
     if (*stage == FS_SERVER_AUTH_RESP_DECODE_FINISH_STAGE) {
         auth_response_t *result = &ctx->auth_decode_cache;
         if (!result->success) {
-            log_error("Remote server authentication failure");
+            log_error("Remote server authentication failure, program exit.");
             exit(FS_EXIT_AUTH_FAILURE);
         } else {
             ctx->auth = true;
@@ -539,7 +743,8 @@ static bool read_proxy_stage_message(struct bufferevent* event, server_ctx_t* ct
     while (byte_buf_readable_bytes(buffer) > 0) {
         // 解码PING、PONG以及代理响应
         uint64_t* stage = &ctx->proxy_decode_stage;
-        proxy_stage_message_decode(buffer, &ctx->proxy_decode_cache, &ctx->ping_cache, &ctx->pong_cache, stage, ctx->proxy_message_cache);
+        proxy_stage_message_decode(buffer, &ctx->proxy_decode_cache, &ctx->ping_cache, &ctx->pong_cache,
+                                   &ctx->dns_decode_cache, stage, ctx->output_cache);
 
         // 分析解码类型和解码进度
         uint8_t type = stage_type(*stage);
@@ -556,6 +761,10 @@ static bool read_proxy_stage_message(struct bufferevent* event, server_ctx_t* ct
         } else if (type == FS_SERVER_SVID_PONG && step == FS_SERVER_PONG_DECODE_FINISH_STAGE) {
             *stage = 0;
             memset(&ctx->pong_cache, 0, sizeof(struct pong_s));
+        } else if (type == FS_SERVER_SVID_DNS && step == FS_SERVER_DNS_RESP_DECODE_FINISH_STAGE) {
+            process_dns_response(ctx);
+            *stage = 0;
+            dns_decode_cache_clean(&ctx->dns_decode_cache);
         }
     }
     byte_buf_release(buffer);
@@ -593,10 +802,49 @@ static void process_ping_message(server_ctx_t* ctx) {
     byte_buf_t* buffer = byte_buf_new(sizeof(struct pong_s) - 1);
     byte_buf_write_char(buffer, PONG.svid);
     byte_buf_write_int(buffer, PONG.len);
-    byte_buf_write_string(buffer, PONG.content, sizeof(PONG.content) - 1);
+    byte_buf_write_chars(buffer, PONG.content, sizeof(PONG.content) - 1);
 
     byte_buf_event_write(buffer, event);
     byte_buf_release(buffer);
+}
+
+
+static void process_dns_response(server_ctx_t* ctx) {
+    dns_response_t* response = &ctx->dns_decode_cache;
+    uint16_t tid = response->tid;
+    if (tid >= FS_SERVER_MAX_DNS_TRANSACTION) {
+        log_error("DNS Response transaction id out of bounds, value: %d", tid);
+        exit(1);
+    }
+
+    dns_client_ctx_t* client_ctx = ctx->dns_transactions[tid];
+    if (client_ctx == NULL) {
+        log_error("Could not fond DNS response transaction id: %d", tid);
+        return;
+    }
+
+    dns_service_client_ctx_set_flag(client_ctx, response->flag);
+
+    for (int i = 0; i < response->answer_cnt; i++) {
+        dns_record_t* record = &response->answers[i];
+        dns_service_client_ctx_add_reply(client_ctx, FS_DNS_SECTION_ANSWER, record->domain, record->type,
+                                         record->class, record->ttl, record->data);
+    }
+
+    for (int i = 0; i < response->authority_cnt; i++) {
+        dns_record_t* record = &response->authority[i];
+        dns_service_client_ctx_add_reply(client_ctx, FS_DNS_SECTION_AUTHORITY, record->domain, record->type,
+                                         record->class, record->ttl, record->data);
+    }
+
+    for (int i = 0; i < response->additional_info_cnt; i++) {
+        dns_record_t* record = &response->additional_info[i];
+        dns_service_client_ctx_add_reply(client_ctx, FS_DNS_SECTION_ADDITIONAL, record->domain, record->type,
+                                         record->class, record->ttl, record->data);
+    }
+
+    dns_service_client_ctx_finish(client_ctx, response->flag >> 12);
+    ctx->dns_transactions[tid] = NULL;
 }
 
 
@@ -649,14 +897,14 @@ static inline void send_auth_request(server_ctx_t* ctx, struct bufferevent* buff
     size_t size = sizeof(request.header) + sizeof(request.auth_type) + sizeof(request.len) + request.len;
     byte_buf_t* buffer = byte_buf_new(size);
 
-    byte_buf_write_string(buffer, request.header, FS_SERVER_AUTH_MSG_HEADER_LEN);
+    byte_buf_write_chars(buffer, request.header, FS_SERVER_AUTH_MSG_HEADER_LEN);
     byte_buf_write_byte(buffer, request.auth_type);
     byte_buf_write_ushort(buffer, request.len);
-    byte_buf_write_string(buffer, request.msg, request.len);
+    byte_buf_write_chars(buffer, request.msg, request.len);
 
     log_info("Send auth message to remote proxy server %s:%d", ctx->config->hostname, ctx->config->port);
     byte_buf_event_write(buffer, bufferevent);
-    free(buffer);
+    byte_buf_release(buffer);
 }
 
 
@@ -666,7 +914,7 @@ static void auth_response_decode(byte_buf_t* buffer, auth_response_t* dest, int*
     }
 
     if (*stage == 0) {
-        bool res = byte_buf_read_string(buffer, dest->header, FS_SERVER_AUTH_MSG_HEADER_LEN);
+        bool res = byte_buf_read_chars(buffer, dest->header, FS_SERVER_AUTH_MSG_HEADER_LEN);
         if (!res) {
             return;
         }
@@ -714,15 +962,15 @@ static void auth_response_decode(byte_buf_t* buffer, auth_response_t* dest, int*
             return;
         }
         char* msg = calloc(msglen + 1, 1);
-        byte_buf_read_string(buffer, msg, msglen);
+        byte_buf_read_chars(buffer, msg, msglen);
         dest->extra_msg = msg;
         (*stage)++;
     }
 }
 
 
-static inline void proxy_stage_message_decode(byte_buf_t* buffer, proxy_response_t* response,
-                                       ping_t* ping, pong_t* pong, uint64_t* stage, char* cache) {
+static inline void proxy_stage_message_decode(byte_buf_t* buffer, proxy_response_t* response, ping_t* ping,
+                                              pong_t* pong, dns_response_t* dns_response, uint64_t* stage, char* cache) {
     uint8_t step = stage_step(*stage);
     if (step == 0) {
         // 提取服务ID，设置stage的type位为服务ID
@@ -735,6 +983,8 @@ static inline void proxy_stage_message_decode(byte_buf_t* buffer, proxy_response
             ping->svid = FS_SERVER_SVID_PING;
         } else if (svid == FS_SERVER_SVID_PONG) {
             pong->svid = FS_SERVER_SVID_PONG;
+        } else if (svid == FS_SERVER_SVID_DNS) {
+            dns_response->svid = FS_SERVER_SVID_DNS;
         } else {
             assert(0);
         }
@@ -750,66 +1000,21 @@ static inline void proxy_stage_message_decode(byte_buf_t* buffer, proxy_response
         ping_decode(buffer, ping, stage);
     } else if (type == FS_SERVER_SVID_PONG) {
         pong_decode(buffer, pong, stage);
+    } else if (type == FS_SERVER_SVID_DNS) {
+        dns_response_decode(buffer, dns_response, stage, cache);
     } else {
         assert(0);
     }
 }
 
 
-static inline bool proxy_message_decode_uint32(byte_buf_t* buffer, uint32_t* dest, uint64_t* stage) {
-    int32_t readable = byte_buf_readable_bytes(buffer);
-    int32_t hasread = stage_decoded_length(*stage);
-    void* addr = (void*) dest;
-    if (hasread + readable >= 4) {
-        byte_buf_read_bytes(buffer, addr + hasread, 4 - hasread);
-        *dest = ntohl(*dest);
-        stage_decoded_length_set(stage, 4);
-        return true;
-    } else {
-        byte_buf_read_bytes(buffer, addr + hasread, readable);
-        stage_decoded_length_set(stage, hasread + readable);
-        return false;
-    }
-}
-
-
-static inline bool proxy_message_decode_msg(byte_buf_t* buffer, byte_buf_t* dest, uint64_t* stage, uint32_t mlen) {
-    int32_t readable = byte_buf_readable_bytes(buffer);
-    int32_t hasread = stage_decoded_length(*stage);
-    if (hasread + readable >= mlen) {
-        bool res = byte_buf_transfer(buffer, dest, (int32_t) mlen - hasread);
-        assert(res);
-        stage_decoded_length_set(stage, mlen);
-        return true;
-    } else {
-        bool res = byte_buf_transfer(buffer, dest, readable);
-        assert(res);
-        stage_decoded_length_set(stage, hasread + readable);
-        assert(byte_buf_readable_bytes(dest) == hasread + readable);
-        return false;
-    }
-}
-
-static inline bool proxy_message_decode_string(byte_buf_t* buffer, char* dest, uint64_t* stage, uint32_t mlen) {
-    int32_t readable = byte_buf_readable_bytes(buffer);
-    int32_t hasread = stage_decoded_length(*stage);
-    if (hasread + readable >= mlen) {
-        bool res = byte_buf_read_string(buffer, dest, (int32_t) mlen - hasread);
-        assert(res);
-        stage_decoded_length_set(stage, mlen);
-        return true;
-    } else {
-        byte_buf_read_string(buffer, dest + hasread, readable);
-        stage_decoded_length_set(stage, hasread + readable);
-        return false;
-    }
-}
-
 
 static inline void proxy_response_decode(byte_buf_t* buffer, proxy_response_t* response, uint64_t* stage, char* cache) {
     uint8_t step = stage_step(*stage);
+    uint32_t* decode_length = ((void*) stage) + 1;
+
     if (step == 1) {
-        bool res = proxy_message_decode_uint32(buffer, &response->len, stage);
+        bool res = message_decode_uint32(buffer, &response->len, decode_length);
         if (!res) {
             return;
         }
@@ -824,7 +1029,7 @@ static inline void proxy_response_decode(byte_buf_t* buffer, proxy_response_t* r
     }
 
     if (step == 2) {
-        bool res = proxy_message_decode_uint32(buffer, &response->tid, stage);
+        bool res = message_decode_uint32(buffer, &response->tid, decode_length);
         if (!res) {
             return;
         }
@@ -844,7 +1049,7 @@ static inline void proxy_response_decode(byte_buf_t* buffer, proxy_response_t* r
     }
 
     if (step == 4) {
-        bool res = proxy_message_decode_uint32(buffer, &response->mlen, stage);
+        bool res = message_decode_uint32(buffer, &response->mlen, decode_length);
         if (!res) {
             return;
         }
@@ -856,10 +1061,10 @@ static inline void proxy_response_decode(byte_buf_t* buffer, proxy_response_t* r
         uint32_t mlen = response->mlen;
         assert(response->len == mlen + 1 + 4 + 4);
         if (response->msg == NULL) {
-            response->msg = mlen <= FS_SERVER_PROXY_MSG_CACHE_SIZE ? byte_buf_wrap(cache, mlen) : byte_buf_new(mlen);
+            response->msg = mlen <= FS_SERVER_OUTPUT_CACHE_SIZE ? byte_buf_wrap(cache, mlen) : byte_buf_new(mlen);
         }
 
-        bool res = proxy_message_decode_msg(buffer, response->msg, stage, mlen);
+        bool res = message_decode_bytes(buffer, response->msg, decode_length, mlen);
         if (!res) {
             return;
         }
@@ -868,11 +1073,136 @@ static inline void proxy_response_decode(byte_buf_t* buffer, proxy_response_t* r
     }
 }
 
+static void dns_response_record_read(dns_record_t* record, byte_buf_t* buffer) {
+    char tmp[512];
+    bool result = byte_buf_read_string(buffer, tmp, sizeof(tmp));
+    assert(result);
+    record->domain = strdup(tmp);
+    byte_buf_read_ushort(buffer, &record->type);
+    byte_buf_read_ushort(buffer, &record->class);
+    byte_buf_read_uint(buffer, &record->ttl);
+    byte_buf_read_ushort(buffer, &record->data_len);
+    if (record->data_len == 0) {
+        record->data = NULL;
+    } else {
+        record->data = byte_buf_new(record->data_len);
+        byte_buf_transfer(buffer, record->data, record->data_len);
+    }
+}
+
+static inline void dns_response_decode(byte_buf_t* buffer, dns_response_t* response, uint64_t* stage, void* cache) {
+    uint8_t step = stage_step(*stage);
+    uint32_t* decode_length = ((void*) stage) + 1;
+    if (step == 1) {
+        bool res = message_decode_uint32(buffer, &response->len, decode_length);
+        if (!res) {
+            return;
+        }
+        if (response->len > 8192) {
+            log_error("Proxy response message decode error: frame too large, size: %d", response->len);
+            exit(FS_EXIT_PROXY_MSG_TOO_LARGE);
+        }
+        stage_decoded_length_set(stage, 0);
+        stage_step_set(stage, ++step);
+    }
+
+    if (step == 2) {
+        bool res = message_decode_uint16(buffer, &response->tid, decode_length);
+        if (!res) {
+            return;
+        }
+        stage_decoded_length_set(stage, 0);
+        stage_step_set(stage, ++step);
+    }
+
+    if (step == 3) {
+        bool res = message_decode_uint16_le(buffer, &response->flag, decode_length);
+        if (!res) {
+            return;
+        }
+        stage_decoded_length_set(stage, 0);
+        stage_step_set(stage, ++step);
+    }
+
+    if (step == 4) {
+        bool res = message_decode_uint16(buffer, &response->question_cnt, decode_length);
+        if (!res) {
+            return;
+        }
+        stage_decoded_length_set(stage, 0);
+        stage_step_set(stage, ++step);
+    }
+
+    if (step == 5) {
+        bool res = message_decode_uint16(buffer, &response->answer_cnt, decode_length);
+        if (!res) {
+            return;
+        }
+        stage_decoded_length_set(stage, 0);
+        stage_step_set(stage, ++step);
+    }
+
+    if (step == 6) {
+        bool res = message_decode_uint16(buffer, &response->authority_cnt, decode_length);
+        if (!res) {
+            return;
+        }
+        stage_decoded_length_set(stage, 0);
+        stage_step_set(stage, ++step);
+    }
+
+    if (step == 7) {
+        bool res = message_decode_uint16(buffer, &response->additional_info_cnt, decode_length);
+        if (!res) {
+            return;
+        }
+        stage_decoded_length_set(stage, 0);
+        stage_step_set(stage, ++step);
+    }
+
+    if (step == 8) {
+        uint32_t mlen = response->len - sizeof(uint16_t) * 6;
+        if (mlen == 0) {
+            stage_decoded_length_set(stage, 0);
+            stage_step_set(stage, ++step);
+            return;
+        }
+
+        bool res = message_decode_string(buffer, cache, decode_length, mlen);
+        if (!res) {
+            return;
+        }
+
+        byte_buf_t* cache_wrap = byte_buf_wrap(cache, mlen);
+        byte_buf_set_write_index(cache_wrap, mlen - 1);
+
+        for (int i = 0; i < response->answer_cnt; i++) {
+            dns_record_t* record = &response->answers[i];
+            dns_response_record_read(record, cache_wrap);
+        }
+
+        for (int i = 0; i < response->authority_cnt; i++) {
+            dns_record_t* record = &response->authority[i];
+            dns_response_record_read(record, cache_wrap);
+        }
+
+        for (int i = 0; i < response->additional_info_cnt; i++) {
+            dns_record_t* record = &response->additional_info[i];
+            dns_response_record_read(record, cache_wrap);
+        }
+
+        byte_buf_release(cache_wrap);
+        stage_decoded_length_set(stage, 0);
+        stage_step_set(stage, ++step);
+    }
+}
+
 
 static void ping_decode(byte_buf_t* buffer, ping_t* ping, uint64_t* stage) {
     uint8_t step = stage_step(*stage);
+    uint32_t* decode_length = ((void*) stage) + 1;
     if (step == 1) {
-        bool res = proxy_message_decode_uint32(buffer, &ping->len, stage);
+        bool res = message_decode_uint32(buffer, &ping->len, decode_length);
         if (!res) {
             return;
         }
@@ -884,7 +1214,7 @@ static void ping_decode(byte_buf_t* buffer, ping_t* ping, uint64_t* stage) {
     }
 
     if (step == 2) {
-        bool res = proxy_message_decode_string(buffer, ping->content, stage, ping->len);
+        bool res = message_decode_string(buffer, ping->content, decode_length, ping->len);
         if (!res) {
             return;
         }
@@ -898,8 +1228,9 @@ static void ping_decode(byte_buf_t* buffer, ping_t* ping, uint64_t* stage) {
 
 static void pong_decode(byte_buf_t* buffer, pong_t* pong, uint64_t* stage) {
     uint8_t step = stage_step(*stage);
+    uint32_t* decode_length = ((void*) stage) + 1;
     if (step == 1) {
-        bool res = proxy_message_decode_uint32(buffer, &pong->len, stage);
+        bool res = message_decode_uint32(buffer, &pong->len, decode_length);
         if (!res) {
             return;
         }
@@ -909,7 +1240,7 @@ static void pong_decode(byte_buf_t* buffer, pong_t* pong, uint64_t* stage) {
     }
 
     if (step == 2) {
-        bool res = proxy_message_decode_string(buffer, pong->content, stage, pong->len);
+        bool res = message_decode_string(buffer, pong->content, decode_length, pong->len);
         if (!res) {
             return;
         }
@@ -940,7 +1271,7 @@ static void proxy_request_transfer(struct bufferevent* event, proxy_request_t* r
     byte_buf_write_int(header, request->len);
     byte_buf_write_int(header, request->tid);
     byte_buf_write_byte(header, request->hlen);
-    byte_buf_write_string(header, (const char*) request->host, request->hlen);
+    byte_buf_write_chars(header, (const char *) request->host, request->hlen);
     byte_buf_write_byte(header, request->type);
     byte_buf_write_ushort(header, request->port);
     byte_buf_write_int(header, request->mlen);
@@ -962,7 +1293,7 @@ static void ping_task(evutil_socket_t fd, short event, void* arg) {
     byte_buf_t* buffer = byte_buf_new(sizeof(struct ping_s) - 1);
     byte_buf_write_char(buffer, PING.svid);
     byte_buf_write_int(buffer, PING.len);
-    byte_buf_write_string(buffer, PING.content, sizeof(PING.content) - 1);
+    byte_buf_write_chars(buffer, PING.content, sizeof(PING.content) - 1);
     byte_buf_event_write(buffer, ctx->event);
     byte_buf_release(buffer);
 }
@@ -982,4 +1313,29 @@ static bool submit_ping_task(server_ctx_t* ctx) {
         return false;
     }
     return true;
+}
+
+static void dns_request_build(dns_request_t* request, uint16_t tid, uint16_t flag,
+                              dns_question_t* questions, int question_cnt) {
+    request->svid = FS_SERVER_SVID_DNS;
+    request->tid = tid;
+    request->flag = flag;
+    request->question_cnt = question_cnt;
+    request->answer_cnt = 0;
+    request->authority_cnt = 0;
+    request->additional_info_cnt = 0;
+
+    uint32_t size = sizeof(request->tid) + sizeof(request->flag) + sizeof(request->question_cnt) +
+            sizeof(request->answer_cnt) + sizeof(request->authority_cnt) + sizeof(request->additional_info_cnt);
+    for (int i = 0; i < question_cnt; ++i) {
+        dns_question_t* dest = &request->questions[i];
+        dns_question_t* src = &questions[i];
+        dest->name = src->name;
+        dest->type = src->type;
+        dest->class = src->class;
+
+        size += strlen(src->name) + 1 + sizeof(src->type) + sizeof(src->class);
+    }
+
+    request->len = size;
 }

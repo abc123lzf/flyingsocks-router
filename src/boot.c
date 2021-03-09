@@ -86,10 +86,9 @@ int main(int argc, char** argv) {
     }
     string_free(logger_config.file_path);
 
-    log_info("flyingsocks router client [version: %s]", FS_VERSION);
+    log_info("flyingsocks router client @ version: %s, build time: %s", FS_VERSION, FS_BUILD_TIME);
 
 #ifdef DEBUG
-    log_info("DEBUG mode enable");
     event_enable_debug_mode();
 #endif
 
@@ -114,18 +113,18 @@ int main(int argc, char** argv) {
 }
 
 static void run_with_single_thread(service_config_t* service_config, server_config_t* server_config) {
-    //struct event_base* evbase = event_base_new();
+    dns_config_t dns_config = {service_config->dns_port};
+    struct event_base* evbase = event_base_new();
 
-    service_ctx_t* service_ctx = proxy_service_init(service_config);
-    direct_forward_ctx_t* direct_forward_ctx = direct_forward_init(service_ctx);
-    server_ctx_t* server_ctx = server_forward_initial(server_config, service_ctx);
+    service_ctx_t* service_ctx = proxy_service_init(service_config, evbase);
+    direct_forward_ctx_t* direct_forward_ctx = direct_forward_init(service_ctx, evbase);
+    dns_ctx_t* dns_ctx = dns_service_initial(&dns_config, evbase);
+    server_ctx_t* server_ctx = server_forward_initial(server_config, service_ctx, dns_ctx, evbase);
 
     log_info("Prepare to running event loop...");
 
     while (!fs_ctx.stop) {
-        direct_forward_run(direct_forward_ctx);
-        proxy_service_run(service_ctx);
-        server_forward_run(server_ctx);
+        event_base_dispatch(evbase);
         usleep(1);
     }
 
@@ -134,6 +133,8 @@ static void run_with_single_thread(service_config_t* service_config, server_conf
     proxy_service_stop(service_ctx);
     direct_forward_stop(direct_forward_ctx);
     server_forward_stop(server_ctx);
+
+    event_base_free(evbase);
 
     log_info("program stop complete");
 }
@@ -215,6 +216,7 @@ static void read_service_config(service_config_t* dest, const char* config_locat
             CFG_INT("proxy-tcp-port", FS_CFG_SERVICE_DEFAULT_TCP_PORT, CFGF_NONE),
             CFG_BOOL("enable-udp-proxy", cfg_false, CFGF_NONE),
             CFG_INT("proxy-udp-port", FS_CFG_SERVICE_DEFAULT_UDP_PORT, CFGF_NONE),
+            CFG_INT("dns-service-port", FS_CFG_SERVICE_DEFAULT_DNS_PORT, CFGF_NONE),
             CFG_END()
     };
 
@@ -225,6 +227,7 @@ static void read_service_config(service_config_t* dest, const char* config_locat
     dest->tcp_port = cfg_getint(cfg, "proxy-tcp-port");
     dest->enable_udp = cfg_getbool(cfg, "enable-udp-proxy") == cfg_true ? true : false;
     dest->udp_port = cfg_getint(cfg, "proxy-udp-port");
+    dest->dns_port = cfg_getint(cfg, "dns-service-port");
 
     long pac_mode = cfg_getint(cfg, "proxy-auto-mode");
     if (pac_mode != FS_PAC_MODE_NO_PROXY && pac_mode != FS_PAC_MODE_IP_WHITELIST && pac_mode != FS_PAC_MODE_GLOBAL) {
@@ -354,11 +357,11 @@ static void sigterm_process_cb(int sig) {
 
 static void event_log_callback_cb(int severity, const char *msg) {
     switch (severity) {
-        case EVENT_LOG_ERR: log_error(msg); break;
-        case EVENT_LOG_WARN: log_warn(msg); break;
-        case EVENT_LOG_MSG: log_info(msg); break;
-        case EVENT_LOG_DEBUG: log_debug(msg); break;
+        case EVENT_LOG_ERR: logger_error(msg); break;
+        case EVENT_LOG_WARN: logger_warn(msg); break;
+        case EVENT_LOG_MSG: logger_info(msg); break;
+        case EVENT_LOG_DEBUG: logger_debug(msg); break;
         default:
-            log_trace(msg);
+            logger_trace(msg);
     }
 }

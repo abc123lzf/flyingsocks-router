@@ -11,6 +11,7 @@
 extern "C" {
 #endif
 
+#include "boot.h"
 #include "buffer.h"
 #include "misc.h"
 #include "pac.h"
@@ -21,16 +22,7 @@ extern "C" {
 
 #define FS_SERVICE_MAX_LISTEN_NUM 8192
 
-// 本地代理服务配置
-typedef struct service_config_s service_config_t;
-
-struct service_config_s {
-    int pac_mode;
-    bool enable_tcp;
-    unsigned short tcp_port;
-    bool enable_udp;
-    unsigned short udp_port;
-};
+struct service_config_s;
 
 // 代理客户端连接上下文
 typedef struct client_ctx_s client_ctx_t;
@@ -42,7 +34,7 @@ typedef struct service_ctx_s service_ctx_t;
  * @param config 配置
  * @return 本地代理服务上下文
  */
-extern service_ctx_t* proxy_service_init(service_config_t* config);
+extern service_ctx_t* proxy_service_init(service_config_t* config, struct event_base* event_base);
 
 /**
  * 运行本地代理服务

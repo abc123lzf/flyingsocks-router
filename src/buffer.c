@@ -84,6 +84,15 @@ byte_buf_t* byte_buf_wrap(void* memory, size_t size) {
 }
 
 
+bool byte_buf_set_write_index(byte_buf_t* buf, int32_t index) {
+    if (buf == NULL || index < 0 || index >= buf->size) {
+        return false;
+    }
+    buf->idx_write = index;
+    return true;
+}
+
+
 bool byte_buf_is_full(byte_buf_t* buf) {
     return buf->idx_write >= buf->size;
 }
@@ -170,7 +179,7 @@ bool byte_buf_write_char(byte_buf_t* buf, char c) {
 }
 
 
-bool byte_buf_write_string(byte_buf_t* buf, const char* string, int length) {
+bool byte_buf_write_chars(byte_buf_t* buf, const char* string, int length) {
     if (buf == NULL || string == NULL || length <= 0) {
         return false;
     }
@@ -343,8 +352,9 @@ bool byte_buf_read_long(byte_buf_t* buf, int64_t* dst) {
     return true;
 }
 
-bool byte_buf_read_string(byte_buf_t* buf, char* dst, int length) {
+bool byte_buf_read_chars(byte_buf_t* buf, char* dst, int length) {
     int32_t idx = buf->idx_read;
+
     if (length < 0 || idx + length > buf->size || idx + length > buf->idx_write) {
         return false;
     }
@@ -359,9 +369,39 @@ bool byte_buf_read_string(byte_buf_t* buf, char* dst, int length) {
 }
 
 
+bool byte_buf_read_string(byte_buf_t* buf, char* dst, size_t dst_size) {
+    if (dst_size == 0) {
+        return false;
+    } else if (dst_size == 1) {
+        dst[0] = '\0';
+        return false;
+    }
+
+    int32_t idx = buf->idx_read;
+    char* addr = buf->memory + idx;
+
+    int i;
+    for (i = 0; i < dst_size; i++) {
+        char c = *(addr + i);
+        *(dst + i) = c;
+        if (c == '\0') {
+            i++;
+            break;
+        }
+    }
+
+    buf->idx_read = idx + i;
+    if (i == dst_size) {
+        dst[dst_size - 1] = '\0';
+        return false;
+    }
+    return true;
+}
+
+
 bool byte_buf_transfer(byte_buf_t* src, byte_buf_t* dst, int length) {
     int32_t idx = src->idx_read;
-    if (idx + length > src->idx_write || dst->idx_write + length > dst->size) {
+    if (length < 0 || idx + length > src->idx_write || dst->idx_write + length > dst->size) {
         return false;
     }
 

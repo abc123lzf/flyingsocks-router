@@ -122,7 +122,12 @@ static struct ipv4_item* search_ipv4_item(uint32_t addr) {
             return midval;
         }
     }
-    return &pac_ctx.items[low];
+
+    if (low == 0) {
+        return &pac_ctx.items[0];
+    }
+
+    return &pac_ctx.items[low - 1];
 }
 
 

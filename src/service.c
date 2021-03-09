@@ -3,7 +3,6 @@
 //
 #include "service.h"
 #include "logger.h"
-#include "pac.h"
 #include <stdlib.h>
 #include <unistd.h>
 #include <linux/netfilter_ipv4.h>
@@ -78,9 +77,13 @@ static client_ctx_t* client_ctx_new(service_ctx_t* service_ctx, struct sockaddr_
 
 static void garbage_queue_clear_consumer(void* data, void* user_data);
 
-service_ctx_t* proxy_service_init(service_config_t* config) {
+service_ctx_t* proxy_service_init(service_config_t* config, struct event_base* event_base) {
+    if (config == NULL || event_base == NULL) {
+        return NULL;
+    }
+
     service_ctx_t* ctx = malloc(sizeof(service_ctx_t));
-    ctx->event_base = NULL;
+    ctx->event_base = event_base;
     ctx->tcp_socket_fd = -1;
     ctx->garbage_queue = deque_new(32);
     for (int i = 0; i < FS_CLIENT_CTX_SUBSCRIBER_MAX; i++) {
@@ -89,13 +92,6 @@ service_ctx_t* proxy_service_init(service_config_t* config) {
     }
 
     if (config->enable_tcp && bind_tcp_port(config->tcp_port, ctx) != 0) {
-        free(ctx);
-        return NULL;
-    }
-
-    struct event_base* event_base = event_base_new();
-    ctx->event_base = event_base;
-    if (event_base == NULL) {
         free(ctx);
         return NULL;
     }
@@ -142,14 +138,14 @@ static int bind_tcp_port(uint16_t port, service_ctx_t* ctx) {
         exit(FS_EXIT_TCP_BIND_FAILURE);
     }
 
-    log_info("[bind_tcp_port] bind port %d success", port);
+    log_info("bind port %d success", port);
 
     if (listen(fd, FS_SERVICE_MAX_LISTEN_NUM) < 0) {
         log_error("[bind_tcp_port] listen port %d failure", port);
         exit(FS_EXIT_TCP_BIND_FAILURE);
     }
 
-    log_info("[bind_tcp_port] listen port %d success", port);
+    log_info("listen port %d success", port);
 
     evutil_make_socket_nonblocking(fd);
     ctx->tcp_socket_fd = fd;
@@ -164,12 +160,12 @@ static void tcp_accept_cb(int fd, short events, void* arg) {
     int client_fd = accept(fd, (struct sockaddr*)&client, &len);
     evutil_make_socket_nonblocking(client_fd);
 #ifdef DEBUG
-    log_trace("[service.c/tcp_accept_cb] Accept client FD:%d", client_fd);
+    log_trace("Accept client FD:%d", client_fd);
 #endif
     struct sockaddr_in target_addr;
     socklen_t socklen = sizeof(struct sockaddr_in);
     if (getsockopt(client_fd, SOL_IP, SO_ORIGINAL_DST, &target_addr, &socklen) != 0) {
-        log_warn("[service.c/tcp_accept_cb] Could not get SO_ORIGINAL_DST, fd: %d", client_fd);
+        log_warn("Could not get SO_ORIGINAL_DST, fd: %d", client_fd);
         close(client_fd);
         return;
     }
@@ -200,7 +196,7 @@ static void tcp_accept_cb(int fd, short events, void* arg) {
 
     client_ctx->refcnt++;
     if (!publish) {
-        log_warn("[service.c/tcp_accept_cb] ClientContextSubscriber not found");
+        log_warn("ClientContextSubscriber not found");
         client_ctx_free(client_ctx);
     }
 }
@@ -219,7 +215,7 @@ static void tcp_read_cb(struct bufferevent* event, void* arg) {
     byte_buf_t* buf = byte_buf_new(4096);
     int read_len = byte_buf_event_read(buf, event);
 #ifdef DEBUG
-    log_trace("[service.c/tcp_read_cb] Read message, capacity: %d", read_len);
+    log_trace("Read message, capacity: %d", read_len);
 #endif
     int res = msg_deliver_transfer(client_ctx->msg_deliverer, buf);
     byte_buf_release(buf);

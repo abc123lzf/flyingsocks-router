@@ -13,7 +13,7 @@ extern "C" {
 
 typedef struct direct_forward_ctx_s direct_forward_ctx_t;
 
-extern direct_forward_ctx_t* direct_forward_init(service_ctx_t* service_ctx);
+extern direct_forward_ctx_t* direct_forward_init(service_ctx_t* service_ctx, struct event_base* event_base);
 extern void direct_forward_run(direct_forward_ctx_t* ctx);
 extern void direct_forward_stop(direct_forward_ctx_t* ctx);
 

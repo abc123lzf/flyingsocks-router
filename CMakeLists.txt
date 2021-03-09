@@ -20,7 +20,7 @@ aux_source_directory(${PROJECT_SOURCE_DIR}/src SEC_LIST)
 
 find_library(LIB_SSL NAMES ssl PATHS ${LIB_PATHS})
 find_library(LIB_CRYPTO NAMES crypto PATHS ${LIB_PATHS})
-message(STATUS ssl library:${LIB_SSL})
+message(STATUS ssl library:${LIB_SSL}${LIB_CRYPTO})
 find_library(LIB_CONFUSE NAMES confuse PATHS ${LIB_PATHS})
 message(STATUS confuse library:${LIB_CONFUSE})
 find_library(LIB_EVENT_CORE NAMES event_core PATHS ${LIB_PATHS})

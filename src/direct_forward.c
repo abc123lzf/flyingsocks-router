@@ -18,20 +18,17 @@ static void tcp_event_cb(struct bufferevent* bevent, short event, void* arg);
 static void tcp_msg_receive_cb(byte_buf_t* buf, void* arg);
 static void client_ctx_close_cb(client_ctx_t* client_ctx, void* arg);
 
-direct_forward_ctx_t* direct_forward_init(service_ctx_t* service_ctx) {
+direct_forward_ctx_t* direct_forward_init(service_ctx_t* service_ctx, struct event_base* event_base) {
+    if (service_ctx == NULL || event_base == NULL) {
+        return NULL;
+    }
+
     direct_forward_ctx_t* ctx = malloc(sizeof(direct_forward_ctx_t));
     if (ctx == NULL) {
         return NULL;
     }
 
-    struct event_base* base = event_base_new();
-    if (base == NULL) {
-        free(ctx);
-        return NULL;
-    }
-
-    ctx->event_base = base;
-
+    ctx->event_base = event_base;
     proxy_service_register_client_ctx_publish_cb(service_ctx, client_ctx_accept_cb, false, ctx);
     return ctx;
 }
@@ -55,7 +52,7 @@ static void client_ctx_accept_cb(client_ctx_t* client_ctx, void* arg) {
 
         int res = bufferevent_socket_connect(event, (const struct sockaddr *) target_addr, sizeof(struct sockaddr_in));
         if (res != 0) {
-            log_warn("[direct_forward.c/client_ctx_accept_cb] Could not connect to target");
+            log_warn("Could not connect to target");
             client_ctx_free(client_ctx);
             return;
         }
@@ -63,7 +60,7 @@ static void client_ctx_accept_cb(client_ctx_t* client_ctx, void* arg) {
         bufferevent_setcb(event, tcp_read_cb, NULL, tcp_event_cb, client_ctx);
         res = bufferevent_enable(event, EV_READ | EV_PERSIST);
         if (res != 0) {
-            log_warn("[direct_forward.c/client_ctx_accept_cb] Could not enable bufferevent");
+            log_warn("Could not enable bufferevent");
             client_ctx_free(client_ctx);
             return;
         }
@@ -94,22 +91,22 @@ static void tcp_event_cb(struct bufferevent* bevent, short event, void* arg) {
         client_ctx_free(client_ctx);
         return;
     } else if (event & BEV_EVENT_ERROR) {
-        log_error("[direct_forward.c/tcp_event_cb] tcp_event_cb");
+        log_error("tcp_event_cb");
         client_ctx_free(client_ctx);
     } else if (event & BEV_EVENT_TIMEOUT) {
-        log_warn("[direct_forward.c/tcp_event_cb] Connect to %d timeout.", client_ctx_get_target_server_address(client_ctx)->sin_addr.s_addr);
+        log_warn("Connect to %d timeout.", client_ctx_get_target_server_address(client_ctx)->sin_addr.s_addr);
         client_ctx_free(client_ctx);
     } else if (event & BEV_EVENT_CONNECTED) {
         msg_deliver_receiver_t* receiver = msg_deliver_receiver_new(tcp_msg_receive_cb, NULL, bevent);
         if (receiver == NULL) {
-            log_error("[direct_forward.c/tcp_event_cb] Could not create MessageDeliverReceiver");
+            log_error("Could not create MessageDeliverReceiver");
             client_ctx_free(client_ctx);
             return;
         }
 
         bool res = client_ctx_set_msg_receiver(client_ctx, receiver);
         if (!res) {
-            log_error("[direct_forward.c/tcp_event_cb] Could not setup MessageDeliverReceiver");
+            log_error("Could not setup MessageDeliverReceiver");
             client_ctx_free(client_ctx);
             return;
         }

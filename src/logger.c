@@ -56,7 +56,7 @@ int logger_initial(logger_config_t* ctx) {
 }
 
 
-void log_error(const char* msg, ...) {
+void logger_error(const char* msg, ...) {
     if (!logger_init || logger_ctx.log_level < FS_LOGGER_LEVEL_ERROR) {
         return;
     }
@@ -77,7 +77,7 @@ void log_error(const char* msg, ...) {
     va_end(va0);
 }
 
-void log_warn(const char* msg, ...) {
+void logger_warn(const char* msg, ...) {
     if (!logger_init || logger_ctx.log_level < FS_LOGGER_LEVEL_WARN) {
         return;
     }
@@ -97,7 +97,7 @@ void log_warn(const char* msg, ...) {
     va_end(va0);
 }
 
-void log_info(const char* msg, ...) {
+void logger_info(const char* msg, ...) {
     if (!logger_init || logger_ctx.log_level < FS_LOGGER_LEVEL_INFO) {
         return;
     }
@@ -117,7 +117,7 @@ void log_info(const char* msg, ...) {
     va_end(va0);
 }
 
-void log_debug(const char* msg, ...) {
+void logger_debug(const char* msg, ...) {
     if (!logger_init || logger_ctx.log_level < FS_LOGGER_LEVEL_DEBUG) {
         return;
     }
@@ -137,7 +137,7 @@ void log_debug(const char* msg, ...) {
     va_end(va0);
 }
 
-void log_trace(const char* msg, ...) {
+void logger_trace(const char* msg, ...) {
     if (!logger_init || logger_ctx.log_level < FS_LOGGER_LEVEL_TRACE) {
         return;
     }
@@ -199,6 +199,6 @@ static inline void header_tag(log_level_t level, char* dst) {
             level_tag = "UNKNOWN";
     }
 
-    sprintf(dst, "%04d-%02d-%02d %02d:%02d:%02d,%03ld <%s> ", time->tm_year + 1900, time->tm_mon + 1, time->tm_mday, time->tm_hour,
+    sprintf(dst, "<%04d-%02d-%02d %02d:%02d:%02d,%03ld>[%5s] ", time->tm_year + 1900, time->tm_mon + 1, time->tm_mday, time->tm_hour,
             time->tm_min, time->tm_sec, now.tv_usec / 1000, level_tag);
 }

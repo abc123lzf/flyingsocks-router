@@ -9,8 +9,10 @@
 extern "C" {
 #endif
 
-#include <stdint.h>
 #include "service.h"
+#include "dns_service.h"
+#include <stdint.h>
+
 
 #define FS_EXIT_AUTH_FAILURE 3000
 #define FS_EXIT_AUTH_MSG_DECODE_ERROR 3001
@@ -51,12 +53,26 @@ struct server_config_s {
 };
 
 typedef struct server_config_s server_config_t;
+
+/** 代理服务器连接上下文  */
 typedef struct server_ctx_s server_ctx_t;
 
-extern server_ctx_t* server_forward_initial(server_config_t *config, service_ctx_t* service_ctx);
+/**
+ * 启动代理服务器连接并初始化
+ * @param config 代理服务器配置
+ * @param service_ctx 本地代理服务上下文
+ * @param dns_service_ctx DNS服务上下文
+ * @return 代理服务器连接上下文
+ */
+extern server_ctx_t* server_forward_initial(server_config_t *config, service_ctx_t* service_ctx,
+                                            dns_ctx_t* dns_service_ctx, struct event_base* event_base);
 
 extern void server_forward_run(server_ctx_t *ctx);
 
+/**
+ * 停止代理服务
+ * @param ctx
+ */
 extern void server_forward_stop(server_ctx_t *ctx);
 
 #ifdef __cplusplus
