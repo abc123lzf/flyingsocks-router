@@ -93,11 +93,16 @@ extern void logger_trace(const char *msg, ...);
 #define log_info(msg, ...) \
     logger_info(msg " --> (%s:%d %s)", ##__VA_ARGS__, FS_FILE_NAME, __LINE__, __func__)
 
+#ifdef DEBUG
 #define log_debug(msg, ...) \
     logger_debug(msg " --> (%s:%d %s)", ##__VA_ARGS__, FS_FILE_NAME, __LINE__, __func__)
 
 #define log_trace(msg, ...) \
     logger_trace(msg " --> (%s:%d %s)", ##__VA_ARGS__, FS_FILE_NAME, __LINE__, __func__)
+#else
+#define log_debug(msg, ...)
+#define log_trace(msg, ...)
+#endif
 
 #ifdef __cplusplus
 }

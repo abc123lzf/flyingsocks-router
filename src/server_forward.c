@@ -12,6 +12,7 @@
 #include <event2/bufferevent_ssl.h>
 #include <assert.h>
 #include <signal.h>
+#include <unistd.h>
 
 #ifndef FS_SERVER_MAX_TRANSACTION
 #define FS_SERVER_MAX_TRANSACTION 8192
@@ -47,11 +48,35 @@ typedef struct proxy_response_s proxy_response_t;
 typedef struct ping_s ping_t;
 typedef struct pong_s pong_t;
 
+/**
+ * 连接代理服务器
+ * @return 是否成功发起连接
+ */
 static bool server_connect(server_ctx_t* ctx);
+
+/**
+ * 接收代理请求回调函数
+ * @param client_ctx 代理请求上下文
+ * @param arg 用户参数，详见结构体client_ctx_cb_args_s
+ */
 static void client_ctx_accept_cb(client_ctx_t* client_ctx, void* arg);
+
+/**
+ * 代理请求上下文被关闭时的回调
+ * @param arg 用户参数，详见结构体client_ctx_cb_args_s
+ */
 static void client_ctx_close_cb(void* arg);
+
+/**
+ * 接收代理请求方发送的数据回调
+ * @param buffer 代理请求方发送的数据
+ * @param arg 用户参数，详见结构体client_ctx_cb_args_s
+ */
 static void client_ctx_request_cb(byte_buf_t* buffer, void* arg);
 
+/**
+ * client_ctx_accept_cb/client_ctx_close_cb/client_ctx_request_cb回调函数的用户参数
+ */
 struct client_ctx_cb_args_s {
     server_ctx_t* server_ctx;
     client_ctx_t* client_ctx;
@@ -94,6 +119,12 @@ struct auth_response_s {
     char* extra_msg;
 };
 
+/**
+ * 解码认证响应信息
+ * @param buffer 待解码的字节缓冲区
+ * @param dest 解码后的数据需要写入的内存
+ * @param stage 保存解码步骤的变量
+ */
 static void auth_response_decode(byte_buf_t* buffer, auth_response_t* dest, int* stage);
 
 #define FS_SERVER_AUTH_RESP_HEADER_LEN (FS_SERVER_AUTH_MSG_HEADER_LEN * sizeof(int8_t) + sizeof(int8_t) + sizeof(uint16_t))
@@ -116,6 +147,7 @@ struct proxy_request_s {
 
 static void proxy_request_build(struct proxy_request_s* request, uint32_t tid, char* host, uint8_t type,
                                 uint16_t port, byte_buf_t* msg);
+
 static void proxy_request_transfer(struct bufferevent* event, proxy_request_t* request);
 
 #define FS_SERVER_PROXY_REQ_TYPE_TCP 0
@@ -863,6 +895,7 @@ static void event_cb(struct bufferevent* bufferevent, short event, void* arg) {
         ctx->auth = false;
         log_warn("Proxy server connection error, ERROR CODE: %s", evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR()));
         bufferevent_free(bufferevent);
+        usleep(200000);
         server_connect(ctx);
         return;
     }

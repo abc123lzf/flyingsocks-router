@@ -107,7 +107,7 @@ void dns_service_client_ctx_add_reply(dns_client_ctx_t* client_ctx, int section,
                                       int class, int ttl, byte_buf_t* data) {
     struct evdns_server_request* request = client_ctx->dns_request;
     int data_len = data != NULL ? byte_buf_readable_bytes(data) : 0;
-    char tmp[512] = {0, 0};
+    char tmp[256] = {0, 0};
     if (data != NULL && data_len > 0) {
         byte_buf_read_chars(data, tmp, data_len);
     }

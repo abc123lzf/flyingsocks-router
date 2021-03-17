@@ -14,7 +14,12 @@
 #include <signal.h>
 
 struct fs_ctx_s {
-    bool stop;
+    struct event_base* event_base;
+    service_ctx_t* service_ctx;
+    direct_forward_ctx_t* direct_forward_ctx;
+    server_ctx_t* server_ctx;
+    dns_ctx_t* dns_ctx;
+
 };
 
 typedef struct fs_ctx_s fs_ctx_t;
@@ -69,11 +74,25 @@ static fs_ctx_t fs_ctx = {0};
  * 命令行参数为配置文件路径，默认当前目录
  */
 int main(int argc, char** argv) {
-    fs_ctx.stop = false;
-
-    char* config_path = argv[0];
+    char* config_path;
     if (argc >= 2) {
         config_path = argv[1];
+    } else {
+        size_t len = strlen(argv[0]);
+        int idx = -1;
+        for (int i = 0; i < len; i++) {
+            if (argv[0][i] == '/') {
+                idx = i;
+            }
+        }
+
+        if (idx == -1) {
+            printf("Could not get default config path, program exit");
+            return 1;
+        }
+
+        argv[0][idx] = '\0';
+        config_path = argv[0];
     }
 
     // 初始化日志组件
@@ -109,6 +128,8 @@ int main(int argc, char** argv) {
 
     // 处理事件
     run_with_single_thread(&service_config, &server_config);
+
+    log_info("program stop complete");
     return 0;
 }
 
@@ -121,22 +142,15 @@ static void run_with_single_thread(service_config_t* service_config, server_conf
     dns_ctx_t* dns_ctx = dns_service_initial(&dns_config, evbase);
     server_ctx_t* server_ctx = server_forward_initial(server_config, service_ctx, dns_ctx, evbase);
 
+    fs_ctx.event_base = evbase;
+    fs_ctx.service_ctx = service_ctx;
+    fs_ctx.direct_forward_ctx = direct_forward_ctx;
+    fs_ctx.dns_ctx = dns_ctx;
+    fs_ctx.server_ctx = server_ctx;
+
     log_info("Prepare to running event loop...");
 
-    while (!fs_ctx.stop) {
-        event_base_dispatch(evbase);
-        usleep(1);
-    }
-
-    log_info("Prepare to stop program");
-
-    proxy_service_stop(service_ctx);
-    direct_forward_stop(direct_forward_ctx);
-    server_forward_stop(server_ctx);
-
-    event_base_free(evbase);
-
-    log_info("program stop complete");
+    event_base_dispatch(evbase);
 }
 
 static void read_logger_config(logger_config_t* dest, const char* config_location) {
@@ -352,7 +366,13 @@ static void sigterm_process_cb(int sig) {
     if (sig != SIGINT) {
         return;
     }
-    fs_ctx.stop = true;
+
+    log_info("Prepare to stop program");
+    proxy_service_stop(fs_ctx.service_ctx);
+    direct_forward_stop(fs_ctx.direct_forward_ctx);
+    dns_service_stop(fs_ctx.dns_ctx);
+    server_forward_stop(fs_ctx.server_ctx);
+    event_base_free(fs_ctx.event_base);
 }
 
 static void event_log_callback_cb(int severity, const char *msg) {

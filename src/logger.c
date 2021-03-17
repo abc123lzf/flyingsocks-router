@@ -14,8 +14,6 @@ typedef struct logger_ctx_s {
     bool open_stdout;
 } logger_ctx_t;
 
-typedef logger_ctx_t LoggerContext;
-
 #define FS_LOGGER_DEFAULT_FILE_NAME "fs-client.log"
 #define FS_LOGGER_LINE_SEPARATOR "\n"
 
@@ -24,7 +22,7 @@ static void print_file(log_level_t level, FILE* file, const char* msg, va_list a
 static void header_tag(log_level_t level, char* dst);
 
 bool logger_init = false;
-LoggerContext logger_ctx = {0};
+logger_ctx_t logger_ctx = {0};
 
 int logger_initial(logger_config_t* ctx) {
     const char* file_path = string_get_content(ctx->file_path);
@@ -164,7 +162,7 @@ static inline void print_stdout(log_level_t level, const char* msg, va_list args
 
     char tag[35];
     header_tag(level, tag);
-    puts(tag);
+    printf("%s", tag);
     vprintf(msg, args);
     printf(FS_LOGGER_LINE_SEPARATOR);
 }
@@ -199,6 +197,6 @@ static inline void header_tag(log_level_t level, char* dst) {
             level_tag = "UNKNOWN";
     }
 
-    sprintf(dst, "<%04d-%02d-%02d %02d:%02d:%02d,%03ld>[%5s] ", time->tm_year + 1900, time->tm_mon + 1, time->tm_mday, time->tm_hour,
-            time->tm_min, time->tm_sec, now.tv_usec / 1000, level_tag);
+    sprintf(dst, "<%04d-%02d-%02d %02d:%02d:%02d,%03ld>[%5s] ", time->tm_year + 1900, time->tm_mon + 1,
+            time->tm_mday, time->tm_hour, time->tm_min, time->tm_sec, now.tv_usec / 1000, level_tag);
 }

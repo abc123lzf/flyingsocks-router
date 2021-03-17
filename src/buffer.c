@@ -400,6 +400,10 @@ bool byte_buf_read_string(byte_buf_t* buf, char* dst, size_t dst_size) {
 
 
 bool byte_buf_transfer(byte_buf_t* src, byte_buf_t* dst, int length) {
+    if (src == dst) {
+        return true;
+    }
+
     int32_t idx = src->idx_read;
     if (length < 0 || idx + length > src->idx_write || dst->idx_write + length > dst->size) {
         return false;
