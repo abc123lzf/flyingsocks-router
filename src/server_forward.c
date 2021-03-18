@@ -1107,7 +1107,7 @@ static inline void proxy_response_decode(byte_buf_t* buffer, proxy_response_t* r
 }
 
 static void dns_response_record_read(dns_record_t* record, byte_buf_t* buffer) {
-    char tmp[512];
+    char tmp[256];
     bool result = byte_buf_read_string(buffer, tmp, sizeof(tmp));
     assert(result);
     record->domain = strdup(tmp);
@@ -1207,7 +1207,7 @@ static inline void dns_response_decode(byte_buf_t* buffer, dns_response_t* respo
         }
 
         byte_buf_t* cache_wrap = byte_buf_wrap(cache, mlen);
-        byte_buf_set_write_index(cache_wrap, mlen - 1);
+        byte_buf_set_write_index(cache_wrap, mlen);
 
         for (int i = 0; i < response->answer_cnt; i++) {
             dns_record_t* record = &response->answers[i];

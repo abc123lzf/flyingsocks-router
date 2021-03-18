@@ -85,7 +85,7 @@ byte_buf_t* byte_buf_wrap(void* memory, size_t size) {
 
 
 bool byte_buf_set_write_index(byte_buf_t* buf, int32_t index) {
-    if (buf == NULL || index < 0 || index >= buf->size) {
+    if (buf == NULL || index < 0 || index > buf->size) {
         return false;
     }
     buf->idx_write = index;

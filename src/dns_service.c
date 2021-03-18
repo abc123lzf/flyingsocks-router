@@ -84,7 +84,12 @@ static void request_cb(struct evdns_server_request* request, void* arg) {
     dns_client_ctx_t* client_ctx = malloc(sizeof(dns_client_ctx_t));
     client_ctx->dns_request = request;
     client_ctx->server_ctx = ctx;
-    ctx->publish_cb(client_ctx, ctx->publish_cb_arg);
+    if (ctx->publish_cb != NULL) {
+        ctx->publish_cb(client_ctx, ctx->publish_cb_arg);
+    } else {
+        evdns_server_request_drop(request);
+        free(client_ctx);
+    }
 }
 
 
