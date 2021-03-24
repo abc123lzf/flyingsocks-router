@@ -1,4 +1,4 @@
-#!/usr/bin/env sh
+#!/usr/bin/env bash
 
 enable_tcp() {
   if [ $# -ne 2 ]; then
@@ -35,7 +35,7 @@ if [ -n "$fs_pid" ]; then
 fi
 
 echo "Startup flyingsocks client..."
-./fscli || echo "Program exec failure"; exit 1;
+./fscli || echo "Program execute failure"; exit 1;
 
 sleep 1000
 fs_pid=$(pidof fscli)
@@ -46,26 +46,28 @@ fi
 
 echo "flyingsocks client PID: $fs_pid"
 
-if [ ! -f "$0/iptables.bak" ]; then
+if [ ! -f "./iptables.bak" ]; then
   iptables_backup
 fi
 
-if [ ! -f "$0/service.conf" ]; then
+if [ ! -f "./service.conf" ]; then
   echo "Service config file $0/service.conf not found"
   exit 1
 fi
 
-cat "$0/service.conf" | while read -r line
+while read -r line
 do
-  if [ ${line:0:1} = "#" ]; then
+  if [ "${line:0:1}" == "#" ]; then
     continue
   fi
-  line_parse=$(echo "$line" | sed 's/\-/_/g')
+  line_parse=$(echo "$line" | sed 's/\-/_/g' | sed s/[[:space:]]//g)
+  if [ "$line_parse" == "" ]; then
+    continue
+  fi
   eval "$line_parse"
-done
+done < "./service.conf"
 
 # shellcheck disable=SC2154
-if [ "$enable_tcp_proxy" = "true" ]; then
-  enable_tcp $fs_pid $proxy_tcp_port
+if [ "$enable_tcp_proxy" == "true" ]; then
+  enable_tcp "$fs_pid" "$proxy_tcp_port"
 fi
-

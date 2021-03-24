@@ -21,8 +21,8 @@ static void print_stdout(log_level_t level, const char* msg, va_list args);
 static void print_file(log_level_t level, FILE* file, const char* msg, va_list args);
 static void header_tag(log_level_t level, char* dst);
 
-bool logger_init = false;
-logger_ctx_t logger_ctx = {0};
+static bool logger_init = false;
+static logger_ctx_t logger_ctx = {0};
 
 int logger_initial(logger_config_t* ctx) {
     const char* file_path = string_get_content(ctx->file_path);

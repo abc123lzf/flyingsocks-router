@@ -10,7 +10,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <confuse.h>
-#include <unistd.h>
 #include <signal.h>
 
 struct fs_ctx_s {

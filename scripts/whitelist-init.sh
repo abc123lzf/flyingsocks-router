@@ -40,7 +40,7 @@ echo "#!/usr/bin/env bash" >> "$OUTPUT_PATH/$IPSET_FILE_NAME"
 echo "ipset flush $IPSET_NAME" >> "$OUTPUT_PATH/$IPSET_FILE_NAME"
 echo "ipset create $IPSET_NAME hash:net timeout 259200 hashsize 4096 maxelem 65535" >> "$OUTPUT_PATH/$IPSET_FILE_NAME"
 
-cat $DOWNLOAD_PATH | while read -r line
+while read -r line
 do
   if [[ $line == \#* ]];
   then
@@ -70,7 +70,7 @@ do
 
   echo "$element" >> "$OUTPUT_PATH/$WHITELIST_FILE_NAME"
   echo "ipset add $IPSET_NAME $element" >> "$OUTPUT_PATH/$IPSET_FILE_NAME"
-done
+done < "$DOWNLOAD_PATH"
 
 chmod +x "$OUTPUT_PATH/$IPSET_FILE_NAME"
 echo "Parse download file complete, output file: $OUTPUT_PATH/$WHITELIST_FILE_NAME $OUTPUT_PATH/$IPSET_FILE_NAME"

@@ -16,7 +16,7 @@ endif()
 set(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/target)
 
 set(LIB_PATHS "/usr/local/lib /usr/local/lib64 /usr/lib64 /usr/lib")
-set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
+set(CMAKE_FIND_LIBRARY_SUFFIXES ".a" ".so")
 
 aux_source_directory(${PROJECT_SOURCE_DIR}/src SEC_LIST)
 
@@ -32,8 +32,6 @@ endif()
 message(STATUS ssl library:${LIB_SSL})
 message(STATUS crypto library:${LIB_CRYPTO})
 
-find_library(LIB_CRYPTO NAMES crypto PATHS ${LIB_PATHS})
-message(STATUS crypto library:${LIB_CRYPTO})
 find_library(LIB_CONFUSE NAMES confuse PATHS ${LIB_PATHS})
 message(STATUS confuse library:${LIB_CONFUSE})
 find_library(LIB_EVENT_CORE NAMES event_core PATHS ${LIB_PATHS})
