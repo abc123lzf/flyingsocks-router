@@ -5,9 +5,11 @@ enable_tcp() {
     exit 1
   fi
 
+  echo "Configure iptables (TCP Transparent proxy)"
+
   iptables -t nat -N FLYINGSOCKS
 
-  iptables -t nat -A FLYINGSOCKS -p tcp -m owner --pid-owner $1 -j RETURN
+  iptables -t nat -A FLYINGSOCKS -d "$1" -j RETURN
 
   iptables -t nat -A FLYINGSOCKS -d 0.0.0.0/8 -j RETURN
   iptables -t nat -A FLYINGSOCKS -d 10.0.0.0/8 -j RETURN
@@ -34,11 +36,16 @@ if [ -n "$fs_pid" ]; then
   exit 1
 fi
 
-echo "Startup flyingsocks client..."
-./fscli || echo "Program execute failure"; exit 1;
+if [ -z "$SERVER_ADDRESS" ]; then
+  echo "Not setup proxy server ip address environment variable SERVER_ADDRESS, ABORT"
+  exit 1
+fi
 
-sleep 1000
-fs_pid=$(pidof fscli)
+echo "Startup flyingsocks client..."
+nohup ./fscli > /dev/null 2>&1& echo $! > /var/run/fscli.pid
+
+sleep 3s
+fs_pid=$(cat /var/run/fscli.pid)
 if [ -z "$fs_pid" ]; then
   echo "Program startup failure"
   exit 1
@@ -69,5 +76,5 @@ done < "./service.conf"
 
 # shellcheck disable=SC2154
 if [ "$enable_tcp_proxy" == "true" ]; then
-  enable_tcp "$fs_pid" "$proxy_tcp_port"
+  enable_tcp "$SERVER_ADDRESS" "$proxy_tcp_port"
 fi

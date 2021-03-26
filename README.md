@@ -32,7 +32,8 @@ make
 ```
 3. 进入项目路径下的target文件夹，按照配置说明进行配置
 4. 执行whitelist-init.sh脚本，然后执行生成的ipset-build.sh脚本，以便初始化IP白名单
-5. 执行startup.sh脚本启动应用程序，当需要关闭时，使用stop.sh脚本
+5. 配置环境变量为SERVER_ADDRESS，其值为服务器IPv4地址
+6. 执行startup.sh脚本启动应用程序，当需要关闭时，使用stop.sh脚本
 
 ### 配置说明
 1. 日志配置
